@@ -25,6 +25,7 @@ SCALE_MIN = 0.5
 SCALE_MAX = 4.0
 SCALE_STEP = 0.2
 DRAG_TOLERANCE = 6   # Pixel-Toleranz für Drag auf Linie
+LEFT_ZONE_PX   = 50  # Pixel-Breite der linken Schnitt-Zone innerhalb eines Streifens
 
 # A4-Ausgabe
 MM = 72 / 25.4          # Punkte pro Millimeter
@@ -513,6 +514,21 @@ class StripApp:
                 return k
         return None
 
+    def _strip_zone(self, x_canvas, y_canvas):
+        """
+        Gibt 'left', 'bottom' oder None zurück je nach Position relativ zu Streifen.
+        'left'   → linker Bereich eines Streifens (Klick setzt linken Rand)
+        'bottom' → Rest eines Streifens (Klick verschiebt Unterkante)
+        None     → grauer Bereich (Klick setzt neuen Schnitt)
+        """
+        k = self._find_strip_at(y_canvas)
+        if k is None:
+            return None
+        left_x_pdf = self.left_margin_per_page.get(self.page_index, 0)
+        if x_canvas < left_x_pdf * self.scale + LEFT_ZONE_PX:
+            return 'left'
+        return 'bottom'
+
     def _find_nearby_line(self, y_canvas):
         """Gibt den Index der nächsten Linie zurück, falls nah genug."""
         cuts = self.cuts_per_page.get(self.page_index, [])
@@ -549,18 +565,21 @@ class StripApp:
             if abs(xc - x_canvas) <= DRAG_TOLERANCE:
                 self.canvas.config(cursor="sb_h_double_arrow")
                 return
-        # Innerhalb eines Streifens → Unterkante verschiebbar
-        if self.doc and self._find_strip_at(y_canvas) is not None:
+        # Innerhalb eines Streifens → Zone bestimmt Cursor
+        zone = self._strip_zone(x_canvas, y_canvas)
+        if zone == 'left':
+            self.canvas.config(cursor="left_side")
+            return
+        if zone == 'bottom':
             self.canvas.config(cursor="bottom_side")
             return
         self.canvas.config(cursor="crosshair")
 
     def on_mouse_move(self, event):
         if self._drag_line_index is not None:
-            return  # Cursor während Drag nicht ändern
-        x_canvas = self.canvas.canvasx(event.x)
-        y_canvas = self.canvas.canvasy(event.y)
-        self._update_cursor(x_canvas, y_canvas)
+            return
+        self._update_cursor(self.canvas.canvasx(event.x),
+                            self.canvas.canvasy(event.y))
 
     def on_mouse_down(self, event):
         if self._takt_click_handled:
@@ -577,10 +596,20 @@ class StripApp:
             self.canvas.config(cursor="fleur")
         else:
             self._drag_line_index = None
+            x_canvas = self.canvas.canvasx(event.x)
             y_pdf = self._canvas_to_pdf_y(y_canvas)
             page_height = self.doc[self.page_index].rect.height
+            zone = self._strip_zone(x_canvas, y_canvas)
 
-            # Klick innerhalb eines Streifens → Unterkante (grüne Linie) verschieben
+            # Klick links im Streifen → linken Rand setzen
+            if zone == 'left':
+                x_pdf = x_canvas / self.scale
+                self.left_margin_per_page[self.page_index] = x_pdf
+                self._draw_lines()
+                self.status.config(text=f"Linker Rand gesetzt: x={x_pdf:.1f} pt")
+                return
+
+            # Klick im Streifen (Rest) → Unterkante (grüne Linie) verschieben
             k = self._find_strip_at(y_canvas)
             if k is not None:
                 cuts = self.cuts_per_page[self.page_index]
