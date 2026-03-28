@@ -61,9 +61,18 @@ class StripApp:
         # Aktuell angezeigte Seite als PhotoImage (muss als Referenz gehalten werden)
         self._photo = None
 
+        # Pro Seite: Taktzahlen je Streifen (Index = sortierte Streifen-Position)
+        self.takt_per_page: dict[int, list[int]] = {}
+
         # Drag-State
         self._drag_line_index = None
         self._drag_start_y = None
+
+        # Taktzahl-Klick-Flag (verhindert Doppel-Event canvas + tag)
+        self._takt_click_handled = False
+
+        # Taktzahlen anzeigen?
+        self._show_takt = tk.BooleanVar(value=True)
 
         self._build_ui()
         self._set_icon()
@@ -193,6 +202,8 @@ class StripApp:
         self.rotation_label = tk.Label(toolbar2, text="0.0°", width=6)
         self.rotation_label.pack(side=tk.LEFT)
         tk.Button(toolbar2, text="Reset (Ctrl+0)", command=self.reset_rotation).pack(side=tk.LEFT, padx=4)
+        tk.Checkbutton(toolbar2, text="Taktzahlen", variable=self._show_takt,
+                       command=self._draw_lines).pack(side=tk.LEFT, padx=8)
 
         # Scrollbarer Canvas-Bereich
         frame = tk.Frame(self.root)
@@ -250,6 +261,7 @@ class StripApp:
         self.cuts_per_page = {}
         self.rotation_per_page = {}
         self.left_margin_per_page = {}
+        self.takt_per_page = {}
         self._update_rotation_ui()
         self.render_page()
         self.status.config(text=f"Geöffnet: {path}")
@@ -292,6 +304,9 @@ class StripApp:
 
         # Streifen farbig hinterlegen
         self._draw_strips()
+
+        # Taktzahlen
+        self._draw_takt_labels(page_height)
 
     def _draw_strips(self):
         """Graut alle Bereiche aus, die NICHT behalten werden (Negativ-Darstellung)."""
@@ -346,6 +361,118 @@ class StripApp:
                                     fill="#3399ff", width=2, dash=(6, 4),
                                     tags=("line", "left_margin"))
 
+    # ------------------------------------------------- Taktzahlen ------------
+
+    def _get_sorted_pairs(self, page_idx):
+        """Sortierte (y_top, y_bot)-Paare für eine Seite."""
+        cuts = self.cuts_per_page.get(page_idx, [])
+        return sorted(zip(cuts[::2], cuts[1::2]), key=lambda p: p[0])
+
+    def _get_all_strips_with_takt(self):
+        """
+        Alle vollständigen Streifen global geordnet, mit Taktzahlen.
+        Fehlende Werte werden nach dem Delta-Schema berechnet und gespeichert.
+        Gibt [[page_idx, local_idx, y_top, y_bot, takt], ...] zurück.
+        """
+        result = []
+        for page_idx in sorted(self.cuts_per_page.keys()):
+            for local_idx, (y_top, y_bot) in enumerate(self._get_sorted_pairs(page_idx)):
+                stored = self.takt_per_page.get(page_idx, [])
+                t = stored[local_idx] if local_idx < len(stored) else None
+                result.append([page_idx, local_idx, y_top, y_bot, t])
+
+        # Fehlende Taktzahlen auffüllen
+        for n, entry in enumerate(result):
+            if entry[4] is None:
+                if n == 0:
+                    t = 1
+                elif n == 1:
+                    t = result[0][4] + 4
+                else:
+                    step = result[n - 1][4] - result[n - 2][4]
+                    t = result[n - 1][4] + max(1, step)
+                entry[4] = t
+                self._store_takt(entry[0], entry[1], t)
+        return result
+
+    def _store_takt(self, page_idx, local_idx, value):
+        """Speichert Taktzahl für Streifen (page_idx, local_sorted_idx)."""
+        if page_idx not in self.takt_per_page:
+            self.takt_per_page[page_idx] = []
+        lst = self.takt_per_page[page_idx]
+        while len(lst) <= local_idx:
+            lst.append(None)
+        lst[local_idx] = value
+
+    def _change_takt(self, page_idx, local_idx, delta):
+        """Ändert Taktzahl um delta und propagiert Folgestreifen."""
+        strips = self._get_all_strips_with_takt()
+        global_n = next((i for i, s in enumerate(strips)
+                         if s[0] == page_idx and s[1] == local_idx), None)
+        if global_n is None:
+            return
+
+        old_t = strips[global_n][4]
+        new_t = max(1, old_t + delta)
+        strips[global_n][4] = new_t
+        self._store_takt(page_idx, local_idx, new_t)
+
+        # Schritt für Propagation
+        if global_n == 0:
+            step = (strips[1][4] - old_t) if len(strips) > 1 else 4
+        else:
+            step = new_t - strips[global_n - 1][4]
+        step = max(1, step)
+
+        for k in range(global_n + 1, len(strips)):
+            t = strips[k - 1][4] + step
+            strips[k][4] = t
+            self._store_takt(strips[k][0], strips[k][1], t)
+
+        self._draw_lines()
+
+    def _on_takt_left(self, page_idx, local_idx):
+        self._takt_click_handled = True
+        self._change_takt(page_idx, local_idx, +1)
+
+    def _on_takt_right(self, page_idx, local_idx):
+        self._takt_click_handled = True
+        self._change_takt(page_idx, local_idx, -1)
+
+    def _draw_takt_labels(self, page_height):
+        """Zeichnet [N]-Labels oben links in jeden vollständigen Streifen."""
+        if not self._show_takt.get():
+            return
+        strips = self._get_all_strips_with_takt()
+        left_x_pdf = self.left_margin_per_page.get(self.page_index, 0)
+        x_canvas = left_x_pdf * self.scale + 4
+
+        for page_idx, local_idx, y_top, y_bot, takt in strips:
+            if page_idx != self.page_index:
+                continue
+            y_canvas = self._pdf_to_canvas_y(y_top, page_height) + 4
+            tag = f"takt_{page_idx}_{local_idx}"
+
+            text_item = self.canvas.create_text(
+                x_canvas, y_canvas,
+                text=f"[{takt}]",
+                fill="#ffffff", font=("Courier", 10, "bold"),
+                anchor=tk.NW, tags=("line", "takt_label", tag)
+            )
+            bbox = self.canvas.bbox(text_item)
+            if bbox:
+                bg = self.canvas.create_rectangle(
+                    bbox[0] - 2, bbox[1] - 2, bbox[2] + 2, bbox[3] + 2,
+                    fill="#1a3a4a", outline="#3399ff", width=1,
+                    tags=("line", "takt_label", tag)
+                )
+                self.canvas.tag_raise(text_item, bg)
+
+            self.canvas.tag_bind(tag, "<ButtonPress-1>",
+                                 lambda e, p=page_idx, l=local_idx: self._on_takt_left(p, l))
+            self.canvas.tag_bind(tag, "<ButtonPress-3>",
+                                 lambda e, p=page_idx, l=local_idx: self._on_takt_right(p, l))
+
     # ------------------------------------------- Koordinaten-Umrechnung -----
 
     def _pdf_to_canvas_y(self, y_pdf, page_height):
@@ -370,6 +497,13 @@ class StripApp:
         """Setzt den Cursor je nach Nähe zu einer Linie."""
         if self.doc is None:
             return
+        # Über Taktzahl-Label?
+        items = self.canvas.find_overlapping(x_canvas - 1, y_canvas - 1,
+                                             x_canvas + 1, y_canvas + 1)
+        for item in items:
+            if "takt_label" in self.canvas.gettags(item):
+                self.canvas.config(cursor="hand2")
+                return
         # Nähe zu horizontaler Schnittlinie?
         cuts = self.cuts_per_page.get(self.page_index, [])
         page_height = self.doc[self.page_index].rect.height
@@ -395,6 +529,9 @@ class StripApp:
         self._update_cursor(x_canvas, y_canvas)
 
     def on_mouse_down(self, event):
+        if self._takt_click_handled:
+            self._takt_click_handled = False
+            return
         if self.doc is None:
             return
         y_canvas = self.canvas.canvasy(event.y)
@@ -433,6 +570,9 @@ class StripApp:
         self._update_cursor(x_canvas, y_canvas)
 
     def on_right_click(self, event):
+        if self._takt_click_handled:
+            self._takt_click_handled = False
+            return
         if self.doc is None:
             return
         x_canvas = self.canvas.canvasx(event.x)
@@ -567,12 +707,19 @@ class StripApp:
     def remove_last_line(self):
         cuts = self.cuts_per_page.get(self.page_index)
         if cuts:
+            n_before = len(cuts) // 2
             cuts.pop()
+            n_after = len(cuts) // 2
+            if n_after < n_before:
+                takts = self.takt_per_page.get(self.page_index, [])
+                if len(takts) > n_after:
+                    del takts[n_after:]
             self._draw_lines()
             self.status.config(text="Letzte Linie entfernt.")
 
     def clear_lines(self):
         self.cuts_per_page[self.page_index] = []
+        self.takt_per_page[self.page_index] = []
         self._draw_lines()
         self.status.config(text="Alle Linien dieser Seite gelöscht.")
 
