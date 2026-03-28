@@ -31,12 +31,20 @@ LEFT_ZONE_PX   = 50  # Pixel-Breite der linken Schnitt-Zone innerhalb eines Stre
 MM = 72 / 25.4          # Punkte pro Millimeter
 A4_W = 595.276          # A4 Breite in Punkten
 A4_H = 841.890          # A4 Höhe in Punkten
-OUT_MARGIN_TOP    = 15 * MM   # Rand oben
-OUT_MARGIN_BOTTOM = 22 * MM   # Rand unten (Platz für Fusszeile)
-OUT_MARGIN_LEFT   = 10 * MM   # Linker Rand bei benutzerdefiniertem linken Schnitt
-OUT_GAP           =  8 * MM   # Abstand zwischen Streifen
 EXPORT_DPI        = 300       # Auflösung für rotierte Streifen
 EXPORT_SCALE      = EXPORT_DPI / 72
+
+# Export-Presets (page_w, page_h, margin_top, margin_bottom, margin_left, gap)
+EXPORT_PRESETS = {
+    "komprimiert": (A4_W, A4_H,  8*MM, 18*MM,  5*MM,  3*MM),
+    "tablet":      (A4_H, A4_W, 10*MM, 20*MM,  8*MM,  5*MM),  # A4 quer
+    "print":       (A4_W, A4_H, 15*MM, 22*MM, 10*MM,  8*MM),
+}
+# Fallback-Konstanten (werden zur Laufzeit aus Preset überschrieben)
+OUT_MARGIN_TOP    = 15 * MM
+OUT_MARGIN_BOTTOM = 22 * MM
+OUT_MARGIN_LEFT   = 10 * MM
+OUT_GAP           =  8 * MM
 
 
 class StripApp:
@@ -76,6 +84,9 @@ class StripApp:
 
         # Taktzahlen anzeigen?
         self._show_takt = tk.BooleanVar(value=True)
+
+        # Export-Preset
+        self._export_preset = tk.StringVar(value="print")
 
         self._build_ui()
         self._set_icon()
@@ -212,6 +223,12 @@ class StripApp:
         tk.Button(toolbar2, text="Reset (Ctrl+0)", command=self.reset_rotation).pack(side=tk.LEFT, padx=4)
         tk.Checkbutton(toolbar2, text="Taktzahlen", variable=self._show_takt,
                        command=self._draw_lines).pack(side=tk.LEFT, padx=8)
+
+        tk.Frame(toolbar2, width=1, bg="#aaa").pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=2)
+        tk.Label(toolbar2, text="Export:").pack(side=tk.LEFT)
+        for val, label in (("komprimiert", "Kompakt"), ("tablet", "Tablet"), ("print", "Print")):
+            tk.Radiobutton(toolbar2, text=label, variable=self._export_preset,
+                           value=val).pack(side=tk.LEFT, padx=2)
 
         # Scrollbarer Canvas-Bereich
         frame = tk.Frame(self.root)
@@ -808,27 +825,25 @@ class StripApp:
 
     # -------------------------------------------------------- PDF-Export ----
 
-    def _add_footers(self, out_doc):
+    def _add_footers(self, out_doc, pg_w=A4_W, pg_h=A4_H):
         total = len(out_doc)
         fname = os.path.basename(self.doc_path)
         gray      = (0.4, 0.4, 0.4)
         gray_light = (0.6, 0.6, 0.6)
         margin    = 5 * MM
         line_h    = 6 * MM   # Höhe pro Zeile (mind. 17pt für fontsize 9 in PyMuPDF 1.27+)
-        foot_top  = A4_H - margin - 2 * line_h
-        foot_bot  = A4_H - margin
+        foot_top  = pg_h - margin - 2 * line_h
+        foot_bot  = pg_h - margin
 
         for i, page in enumerate(out_doc):
             # Seitennummer zentriert (obere Zeile)
-            rect_center = fitz.Rect(0, foot_top, A4_W, foot_top + line_h)
+            rect_center = fitz.Rect(0, foot_top, pg_w, foot_top + line_h)
             page.insert_textbox(rect_center, f"{i + 1} / {total}",
                                 fontsize=9, color=gray, align=1)
-            # Dateiname rechts (obere Zeile)
-            rect_fname = fitz.Rect(A4_W / 2, foot_top, A4_W - margin, foot_top + line_h)
+            rect_fname = fitz.Rect(pg_w / 2, foot_top, pg_w - margin, foot_top + line_h)
             page.insert_textbox(rect_fname, fname,
                                 fontsize=7, color=gray_light, align=2)
-            # zebrastreifen rechts (untere Zeile)
-            rect_brand = fitz.Rect(A4_W / 2, foot_top + line_h, A4_W - margin, foot_bot)
+            rect_brand = fitz.Rect(pg_w / 2, foot_top + line_h, pg_w - margin, foot_bot)
             page.insert_textbox(rect_brand, "zebrastreifen",
                                 fontsize=6, color=gray_light, align=2)
 
@@ -858,9 +873,12 @@ class StripApp:
         if not out_path:
             return
 
+        pg_w, pg_h, mg_top, mg_bot, mg_left, gap = \
+            EXPORT_PRESETS[self._export_preset.get()]
+
         out_doc = fitz.open()
-        cur_page = out_doc.new_page(width=A4_W, height=A4_H)
-        cursor_y = OUT_MARGIN_TOP
+        cur_page = out_doc.new_page(width=pg_w, height=pg_h)
+        cursor_y = mg_top
         # Cache: volle gedrehte Seite bei EXPORT_SCALE (einmal pro Seite rendern)
         _render_cache: dict[int, Image.Image] = {}
 
@@ -875,26 +893,21 @@ class StripApp:
             if rotation == 0:
                 # Vektorgrafik – keine Qualitätseinbusse
                 strip_h = abs(y_bot - y_top)
-                if i > 0 and cursor_y + strip_h > A4_H - OUT_MARGIN_BOTTOM:
-                    cur_page = out_doc.new_page(width=A4_W, height=A4_H)
-                    cursor_y = OUT_MARGIN_TOP
-                x_off = OUT_MARGIN_LEFT if has_custom_margin else (A4_W - strip_w) / 2
+                if i > 0 and cursor_y + strip_h > pg_h - mg_bot:
+                    cur_page = out_doc.new_page(width=pg_w, height=pg_h)
+                    cursor_y = mg_top
+                x_off = mg_left if has_custom_margin else (pg_w - strip_w) / 2
                 dest = fitz.Rect(x_off, cursor_y, x_off + strip_w, cursor_y + strip_h)
                 cur_page.show_pdf_page(dest, self.doc, page_idx, clip=clip)
                 if takt_label:
-                    # insert_text ist in PyMuPDF 1.27 defekt → insert_textbox verwenden
                     cur_page.insert_textbox(
                         fitz.Rect(x_off + 2, cursor_y + 2, x_off + 38, cursor_y + 16),
                         takt_label, fontsize=8, color=(0.15, 0.15, 0.15)
                     )
-                cursor_y += strip_h + OUT_GAP
+                cursor_y += strip_h + gap
 
             else:
-                # Beliebige Rotation: 300-DPI-Raster
-                # WYSIWYG: volle Seite mit Rotation rendern, dann PIL-crop an
-                # denselben Pixelpositionen wie im Canvas (y_top/y_bot * EXPORT_SCALE).
-                # NICHT als PDF-clip verwenden – dort gelten Original-Koordinaten,
-                # die nach Rotation nicht mit dem Canvas-View übereinstimmen.
+                # Beliebige Rotation: 300-DPI-Raster (WYSIWYG, per-page cache)
                 if page_idx not in _render_cache:
                     mat = fitz.Matrix(EXPORT_SCALE, EXPORT_SCALE).prerotate(rotation)
                     pix = src_page.get_pixmap(matrix=mat)
@@ -909,22 +922,21 @@ class StripApp:
                     img = img.crop((crop_x, 0, img.width, img.height))
                 if takt_label:
                     draw = ImageDraw.Draw(img)
-                    px = int(8 * EXPORT_SCALE)  # 8pt in Pixel bei Export-DPI
+                    px = int(8 * EXPORT_SCALE)
                     draw.text((8, 8), takt_label, fill=(40, 40, 40), font_size=px)
-                # Pixmap-Grösse zurück in Punkte umrechnen
                 img_w_pt = img.width / EXPORT_SCALE
                 img_h_pt = img.height / EXPORT_SCALE
-                if i > 0 and cursor_y + img_h_pt > A4_H - OUT_MARGIN_BOTTOM:
-                    cur_page = out_doc.new_page(width=A4_W, height=A4_H)
-                    cursor_y = OUT_MARGIN_TOP
-                x_off = OUT_MARGIN_LEFT if has_custom_margin else (A4_W - img_w_pt) / 2
+                if i > 0 and cursor_y + img_h_pt > pg_h - mg_bot:
+                    cur_page = out_doc.new_page(width=pg_w, height=pg_h)
+                    cursor_y = mg_top
+                x_off = mg_left if has_custom_margin else (pg_w - img_w_pt) / 2
                 dest = fitz.Rect(x_off, cursor_y, x_off + img_w_pt, cursor_y + img_h_pt)
                 buf = io.BytesIO()
                 img.save(buf, format="PNG")
                 cur_page.insert_image(dest, stream=buf.getvalue())
-                cursor_y += img_h_pt + OUT_GAP
+                cursor_y += img_h_pt + gap
 
-        self._add_footers(out_doc)
+        self._add_footers(out_doc, pg_w, pg_h)
         out_doc.save(out_path)
         out_doc.close()
         self.status.config(text=f"Exportiert: {out_path}")
