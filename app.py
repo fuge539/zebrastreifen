@@ -495,9 +495,8 @@ class StripApp:
         self._change_takt(page_idx, local_idx, -1)
 
     def _draw_takt_labels(self, page_height):
-        """Zeichnet [N]-Labels oben links in jeden vollständigen Streifen."""
-        if not self._show_takt.get():
-            return
+        """Zeichnet [N]-Labels (oder [ ] wenn ausgeblendet) oben links in jeden Streifen."""
+        show = self._show_takt.get()
         strips = self._get_all_strips_with_takt()
         left_x_pdf = self.left_margin_per_page.get(self.page_index, 0)
         x_canvas = left_x_pdf * self.scale + 4
@@ -511,10 +510,11 @@ class StripApp:
             has_break = (page_idx, local_idx) in self.pagebreak_set
             bg_color  = "#994400" if has_break else "#1a3a4a"
             bd_color  = "#ff8800" if has_break else "#3399ff"
+            label_text = f"[{takt}]" if show else "[ ]"
 
             text_item = self.canvas.create_text(
                 x_canvas, y_canvas,
-                text=f"[{takt}]",
+                text=label_text,
                 fill="#ffffff", font=("Courier", 10, "bold"),
                 anchor=tk.NW, tags=("line", "takt_label", tag)
             )
