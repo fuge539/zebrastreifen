@@ -809,8 +809,9 @@ class StripApp:
                 dest = fitz.Rect(x_off, cursor_y, x_off + strip_w, cursor_y + strip_h)
                 cur_page.show_pdf_page(dest, self.doc, page_idx, clip=clip)
                 if takt_label:
-                    cur_page.insert_text(
-                        fitz.Point(x_off + 3, cursor_y + 9),
+                    # insert_text ist in PyMuPDF 1.27 defekt → insert_textbox verwenden
+                    cur_page.insert_textbox(
+                        fitz.Rect(x_off + 2, cursor_y + 2, x_off + 38, cursor_y + 16),
                         takt_label, fontsize=8, color=(0.15, 0.15, 0.15)
                     )
                 cursor_y += strip_h + OUT_GAP
@@ -826,7 +827,8 @@ class StripApp:
                     img = img.crop((crop_x, 0, img.width, img.height))
                 if takt_label:
                     draw = ImageDraw.Draw(img)
-                    draw.text((4, 4), takt_label, fill=(30, 30, 30))
+                    px = int(8 * EXPORT_SCALE)  # 8pt in Pixel bei Export-DPI
+                    draw.text((8, 8), takt_label, fill=(40, 40, 40), font_size=px)
                 # Pixmap-Grösse zurück in Punkte umrechnen
                 img_w_pt = img.width / EXPORT_SCALE
                 img_h_pt = img.height / EXPORT_SCALE
