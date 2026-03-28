@@ -861,6 +861,8 @@ class StripApp:
         out_doc = fitz.open()
         cur_page = out_doc.new_page(width=A4_W, height=A4_H)
         cursor_y = OUT_MARGIN_TOP
+        # Cache: volle gedrehte Seite bei EXPORT_SCALE (einmal pro Seite rendern)
+        _render_cache: dict[int, Image.Image] = {}
 
         for i, (page_idx, y_top, y_bot, rotation, takt) in enumerate(strips):
             src_page = self.doc[page_idx]
@@ -889,10 +891,19 @@ class StripApp:
 
             else:
                 # Beliebige Rotation: 300-DPI-Raster
-                clip_full = fitz.Rect(src_page.rect.x0, y_top, src_page.rect.x1, y_bot)
-                mat = fitz.Matrix(EXPORT_SCALE, EXPORT_SCALE).prerotate(rotation)
-                pix = src_page.get_pixmap(matrix=mat, clip=clip_full)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                # WYSIWYG: volle Seite mit Rotation rendern, dann PIL-crop an
+                # denselben Pixelpositionen wie im Canvas (y_top/y_bot * EXPORT_SCALE).
+                # NICHT als PDF-clip verwenden – dort gelten Original-Koordinaten,
+                # die nach Rotation nicht mit dem Canvas-View übereinstimmen.
+                if page_idx not in _render_cache:
+                    mat = fitz.Matrix(EXPORT_SCALE, EXPORT_SCALE).prerotate(rotation)
+                    pix = src_page.get_pixmap(matrix=mat)
+                    _render_cache[page_idx] = Image.frombytes(
+                        "RGB", [pix.width, pix.height], pix.samples)
+                full_img = _render_cache[page_idx]
+                crop_y1 = int(y_top * EXPORT_SCALE)
+                crop_y2 = int(y_bot * EXPORT_SCALE)
+                img = full_img.crop((0, crop_y1, full_img.width, crop_y2))
                 if has_custom_margin:
                     crop_x = int(left_x * EXPORT_SCALE)
                     img = img.crop((crop_x, 0, img.width, img.height))
