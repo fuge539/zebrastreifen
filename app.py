@@ -496,6 +496,23 @@ class StripApp:
 
     # --------------------------------------------------------- Maus-Events --
 
+    def _find_strip_at(self, y_canvas):
+        """
+        Gibt den Einfüge-Index k zurück, falls y_canvas innerhalb des k-ten
+        Streifen-Paares liegt (zwischen Ober- und Unterkante).
+        Gibt None zurück wenn ausserhalb aller Streifen (grauer Bereich).
+        """
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        page_height = self.doc[self.page_index].rect.height
+        n_pairs = len(cuts) // 2
+        for k in range(n_pairs):
+            y_top_c = self._pdf_to_canvas_y(cuts[2 * k],     page_height)
+            y_bot_c = self._pdf_to_canvas_y(cuts[2 * k + 1], page_height)
+            lo, hi = min(y_top_c, y_bot_c), max(y_top_c, y_bot_c)
+            if lo < y_canvas < hi:
+                return k
+        return None
+
     def _find_nearby_line(self, y_canvas):
         """Gibt den Index der nächsten Linie zurück, falls nah genug."""
         cuts = self.cuts_per_page.get(self.page_index, [])
@@ -532,6 +549,10 @@ class StripApp:
             if abs(xc - x_canvas) <= DRAG_TOLERANCE:
                 self.canvas.config(cursor="sb_h_double_arrow")
                 return
+        # Innerhalb eines Streifens → Unterkante verschiebbar
+        if self.doc and self._find_strip_at(y_canvas) is not None:
+            self.canvas.config(cursor="bottom_side")
+            return
         self.canvas.config(cursor="crosshair")
 
     def on_mouse_move(self, event):
@@ -555,9 +576,25 @@ class StripApp:
             self._drag_start_y = y_canvas
             self.canvas.config(cursor="fleur")
         else:
-            # Neuen Schnitt setzen
             self._drag_line_index = None
             y_pdf = self._canvas_to_pdf_y(y_canvas)
+            page_height = self.doc[self.page_index].rect.height
+
+            # Klick innerhalb eines Streifens → Unterkante (grüne Linie) verschieben
+            k = self._find_strip_at(y_canvas)
+            if k is not None:
+                cuts = self.cuts_per_page[self.page_index]
+                cuts[2 * k + 1] = y_pdf
+                pairs = sorted(zip(range(len(cuts) // 2),
+                                   zip(cuts[::2], cuts[1::2])),
+                               key=lambda x: x[1][0])
+                strip_nr = next(i + 1 for i, (ki, _) in enumerate(pairs) if ki == k)
+                self.status.config(
+                    text=f"Streifen {strip_nr}: Unterkante → y={y_pdf:.1f} pt")
+                self._draw_lines()
+                return
+
+            # Neuen Schnitt setzen (grauer Bereich)
             if self.page_index not in self.cuts_per_page:
                 self.cuts_per_page[self.page_index] = []
             self.cuts_per_page[self.page_index].append(y_pdf)
