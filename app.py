@@ -31,7 +31,7 @@ MM = 72 / 25.4          # Punkte pro Millimeter
 A4_W = 595.276          # A4 Breite in Punkten
 A4_H = 841.890          # A4 Höhe in Punkten
 OUT_MARGIN_TOP    = 15 * MM   # Rand oben
-OUT_MARGIN_BOTTOM = 15 * MM   # Rand unten
+OUT_MARGIN_BOTTOM = 22 * MM   # Rand unten (Platz für Fusszeile)
 OUT_MARGIN_LEFT   = 10 * MM   # Linker Rand bei benutzerdefiniertem linken Schnitt
 OUT_GAP           =  8 * MM   # Abstand zwischen Streifen
 EXPORT_DPI        = 300       # Auflösung für rotierte Streifen
@@ -743,7 +743,7 @@ class StripApp:
         gray      = (0.4, 0.4, 0.4)
         gray_light = (0.6, 0.6, 0.6)
         margin    = 5 * MM
-        line_h    = 4 * MM   # Höhe pro Zeile
+        line_h    = 6 * MM   # Höhe pro Zeile (mind. 17pt für fontsize 9 in PyMuPDF 1.27+)
         foot_top  = A4_H - margin - 2 * line_h
         foot_bot  = A4_H - margin
 
