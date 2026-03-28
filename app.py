@@ -88,6 +88,9 @@ class StripApp:
         # Export-Preset
         self._export_preset = tk.StringVar(value="print")
 
+        # Seitenwechsel-Marker: (page_idx, local_idx) → neue Seite erzwingen
+        self.pagebreak_set: set[tuple[int, int]] = set()
+
         self._build_ui()
         self._set_icon()
 
@@ -228,7 +231,12 @@ class StripApp:
         tk.Label(toolbar2, text="Export:").pack(side=tk.LEFT)
         for val, label in (("komprimiert", "Kompakt"), ("tablet", "Tablet"), ("print", "Print")):
             tk.Radiobutton(toolbar2, text=label, variable=self._export_preset,
-                           value=val).pack(side=tk.LEFT, padx=2)
+                           value=val,
+                           command=self._draw_lines).pack(side=tk.LEFT, padx=2)
+
+        tk.Frame(toolbar2, width=1, bg="#aaa").pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=2)
+        self.layout_label = tk.Label(toolbar2, text="", fg="#555", font=("Helvetica", 8))
+        self.layout_label.pack(side=tk.LEFT, padx=4)
 
         # Scrollbarer Canvas-Bereich
         frame = tk.Frame(self.root)
@@ -288,6 +296,7 @@ class StripApp:
         self.left_margin_per_page = {}
         self.takt_per_page = {}
         self.takt_manual = set()
+        self.pagebreak_set = set()
         self._update_rotation_ui()
         self.render_page()
         self.status.config(text=f"Geöffnet: {path}")
@@ -331,8 +340,14 @@ class StripApp:
         # Streifen farbig hinterlegen
         self._draw_strips()
 
+        # Seitenwechsel-Marker
+        self._draw_pagebreak_markers(page_height)
+
         # Taktzahlen
         self._draw_takt_labels(page_height)
+
+        # Layout-Vorschau aktualisieren
+        self._update_layout_label()
 
     def _draw_strips(self):
         """Graut alle Bereiche aus, die NICHT behalten werden (Negativ-Darstellung)."""
@@ -484,6 +499,10 @@ class StripApp:
             y_canvas = self._pdf_to_canvas_y(y_top, page_height) + 4
             tag = f"takt_{page_idx}_{local_idx}"
 
+            has_break = (page_idx, local_idx) in self.pagebreak_set
+            bg_color  = "#994400" if has_break else "#1a3a4a"
+            bd_color  = "#ff8800" if has_break else "#3399ff"
+
             text_item = self.canvas.create_text(
                 x_canvas, y_canvas,
                 text=f"[{takt}]",
@@ -494,15 +513,86 @@ class StripApp:
             if bbox:
                 bg = self.canvas.create_rectangle(
                     bbox[0] - 2, bbox[1] - 2, bbox[2] + 2, bbox[3] + 2,
-                    fill="#1a3a4a", outline="#3399ff", width=1,
+                    fill=bg_color, outline=bd_color, width=1,
                     tags=("line", "takt_label", tag)
                 )
                 self.canvas.tag_raise(text_item, bg)
 
             self.canvas.tag_bind(tag, "<ButtonPress-1>",
-                                 lambda e, p=page_idx, l=local_idx: self._on_takt_left(p, l))
+                                 lambda e, p=page_idx, l=local_idx:
+                                     self._on_takt_toggle_break(p, l)
+                                     if (e.state & 0x4) else self._on_takt_left(p, l))
             self.canvas.tag_bind(tag, "<ButtonPress-3>",
                                  lambda e, p=page_idx, l=local_idx: self._on_takt_right(p, l))
+
+    # ----------------------------------------- Seitenwechsel-Marker ----------
+
+    def _on_takt_toggle_break(self, page_idx, local_idx):
+        self._takt_click_handled = True
+        key = (page_idx, local_idx)
+        if key in self.pagebreak_set:
+            self.pagebreak_set.discard(key)
+            self.status.config(text="Seitenwechsel entfernt.")
+        else:
+            self.pagebreak_set.add(key)
+            self.status.config(text="Seitenwechsel gesetzt.")
+        self._draw_lines()
+
+    def _draw_pagebreak_markers(self, page_height):
+        """Orangefarbene gestrichelte Linie + Beschriftung für Seitenwechsel-Marker."""
+        strips = self._get_all_strips_with_takt()
+        for page_idx, local_idx, y_top, y_bot, takt in strips:
+            if page_idx != self.page_index:
+                continue
+            if (page_idx, local_idx) not in self.pagebreak_set:
+                continue
+            y_c = self._pdf_to_canvas_y(y_top, page_height)
+            w = int(self.doc[self.page_index].rect.width * self.scale)
+            self.canvas.create_line(0, y_c - 3, w, y_c - 3,
+                                    fill="#ff8800", width=3, dash=(8, 4),
+                                    tags="line")
+            self.canvas.create_text(w - 4, y_c - 10, text="↵ neue Seite",
+                                    fill="#ff8800", font=("Helvetica", 8, "bold"),
+                                    anchor=tk.E, tags="line")
+
+    # ---------------------------------------- Layout-Vorschau ---------------
+
+    def _simulate_layout(self):
+        """Berechnet die Seitenverteilung ohne PDF zu erzeugen.
+        Gibt Liste von Strip-Counts je Ausgabe-Seite zurück."""
+        strips = self._collect_strips()
+        if not strips:
+            return []
+        pg_w, pg_h, mg_top, mg_bot, mg_left, gap = \
+            EXPORT_PRESETS[self._export_preset.get()]
+        pages, cursor_y, count = [], mg_top, 0
+        for i, (*_, rotation, takt, forced_break) in enumerate(strips):
+            # Streifen-Höhe approximieren (y_top/y_bot stecken in strips[i])
+            y_top_s = strips[i][1]
+            y_bot_s = strips[i][2]
+            strip_h = abs(y_bot_s - y_top_s)
+            if i > 0 and (forced_break or cursor_y + strip_h > pg_h - mg_bot):
+                pages.append(count)
+                cursor_y, count = mg_top, 0
+            cursor_y += strip_h + gap
+            count += 1
+        if count:
+            pages.append(count)
+        return pages
+
+    def _update_layout_label(self):
+        if not self.doc:
+            self.layout_label.config(text="")
+            return
+        pages = self._simulate_layout()
+        if not pages:
+            self.layout_label.config(text="")
+            return
+        n = len(pages)
+        dist = "/".join(str(c) for c in pages)
+        total = sum(pages)
+        self.layout_label.config(
+            text=f"→  {n} {'Seite' if n == 1 else 'Seiten'}  |  {total} Str.  ({dist})")
 
     # ------------------------------------------- Koordinaten-Umrechnung -----
 
@@ -820,6 +910,8 @@ class StripApp:
         self.takt_per_page[self.page_index] = []
         self.takt_manual = {(p, l) for p, l in self.takt_manual
                             if p != self.page_index}
+        self.pagebreak_set = {(p, l) for p, l in self.pagebreak_set
+                              if p != self.page_index}
         self._draw_lines()
         self.status.config(text="Alle Linien dieser Seite gelöscht.")
 
@@ -848,11 +940,12 @@ class StripApp:
                                 fontsize=6, color=gray_light, align=2)
 
     def _collect_strips(self):
-        """Gibt alle Streifen in Reihenfolge zurück: [(page_idx, y_top, y_bot, rotation_deg, takt), ...]"""
+        """Gibt alle Streifen zurück: [(page_idx, y_top, y_bot, rotation, takt, forced_break), ...]"""
         strips = []
         for page_idx, local_idx, y_top, y_bot, takt in self._get_all_strips_with_takt():
             rotation = self.rotation_per_page.get(page_idx, 0.0)
-            strips.append((page_idx, y_top, y_bot, rotation, takt))
+            forced_break = (page_idx, local_idx) in self.pagebreak_set
+            strips.append((page_idx, y_top, y_bot, rotation, takt, forced_break))
         return strips
 
     def export_pdf(self):
@@ -882,7 +975,7 @@ class StripApp:
         # Cache: volle gedrehte Seite bei EXPORT_SCALE (einmal pro Seite rendern)
         _render_cache: dict[int, Image.Image] = {}
 
-        for i, (page_idx, y_top, y_bot, rotation, takt) in enumerate(strips):
+        for i, (page_idx, y_top, y_bot, rotation, takt, forced_break) in enumerate(strips):
             src_page = self.doc[page_idx]
             left_x = self.left_margin_per_page.get(page_idx, src_page.rect.x0)
             clip = fitz.Rect(left_x, y_top, src_page.rect.x1, y_bot)
@@ -893,7 +986,7 @@ class StripApp:
             if rotation == 0:
                 # Vektorgrafik – keine Qualitätseinbusse
                 strip_h = abs(y_bot - y_top)
-                if i > 0 and cursor_y + strip_h > pg_h - mg_bot:
+                if i > 0 and (forced_break or cursor_y + strip_h > pg_h - mg_bot):
                     cur_page = out_doc.new_page(width=pg_w, height=pg_h)
                     cursor_y = mg_top
                 x_off = mg_left if has_custom_margin else (pg_w - strip_w) / 2
@@ -926,7 +1019,7 @@ class StripApp:
                     draw.text((8, 8), takt_label, fill=(40, 40, 40), font_size=px)
                 img_w_pt = img.width / EXPORT_SCALE
                 img_h_pt = img.height / EXPORT_SCALE
-                if i > 0 and cursor_y + img_h_pt > pg_h - mg_bot:
+                if i > 0 and (forced_break or cursor_y + img_h_pt > pg_h - mg_bot):
                     cur_page = out_doc.new_page(width=pg_w, height=pg_h)
                     cursor_y = mg_top
                 x_off = mg_left if has_custom_margin else (pg_w - img_w_pt) / 2
