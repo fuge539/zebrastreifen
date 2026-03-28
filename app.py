@@ -208,6 +208,7 @@ class StripApp:
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
         self.canvas.bind("<ButtonPress-3>", self.on_right_click)
+        self.canvas.bind("<Motion>", self.on_mouse_move)
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)          # Windows
         self.canvas.bind("<Button-4>", self.on_mousewheel)            # Linux scroll up
         self.canvas.bind("<Button-5>", self.on_mousewheel)            # Linux scroll down
@@ -365,6 +366,34 @@ class StripApp:
                 return i
         return None
 
+    def _update_cursor(self, x_canvas, y_canvas):
+        """Setzt den Cursor je nach Nähe zu einer Linie."""
+        if self.doc is None:
+            return
+        # Nähe zu horizontaler Schnittlinie?
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        page_height = self.doc[self.page_index].rect.height
+        for y_pdf in cuts:
+            yc = self._pdf_to_canvas_y(y_pdf, page_height)
+            if abs(yc - y_canvas) <= DRAG_TOLERANCE:
+                self.canvas.config(cursor="sb_v_double_arrow")
+                return
+        # Nähe zur vertikalen Randlinie?
+        left_x_pdf = self.left_margin_per_page.get(self.page_index)
+        if left_x_pdf is not None:
+            xc = left_x_pdf * self.scale
+            if abs(xc - x_canvas) <= DRAG_TOLERANCE:
+                self.canvas.config(cursor="sb_h_double_arrow")
+                return
+        self.canvas.config(cursor="crosshair")
+
+    def on_mouse_move(self, event):
+        if self._drag_line_index is not None:
+            return  # Cursor während Drag nicht ändern
+        x_canvas = self.canvas.canvasx(event.x)
+        y_canvas = self.canvas.canvasy(event.y)
+        self._update_cursor(x_canvas, y_canvas)
+
     def on_mouse_down(self, event):
         if self.doc is None:
             return
@@ -374,6 +403,7 @@ class StripApp:
             # Drag-Modus: bestehende Linie verschieben
             self._drag_line_index = idx
             self._drag_start_y = y_canvas
+            self.canvas.config(cursor="fleur")
         else:
             # Neuen Schnitt setzen
             self._drag_line_index = None
@@ -398,6 +428,9 @@ class StripApp:
 
     def on_mouse_up(self, event):
         self._drag_line_index = None
+        x_canvas = self.canvas.canvasx(event.x)
+        y_canvas = self.canvas.canvasy(event.y)
+        self._update_cursor(x_canvas, y_canvas)
 
     def on_right_click(self, event):
         if self.doc is None:
