@@ -63,6 +63,8 @@ class StripApp:
 
         # Pro Seite: Taktzahlen je Streifen (Index = sortierte Streifen-Position)
         self.takt_per_page: dict[int, list[int]] = {}
+        # Manuell gesetzte Taktzahlen: (page_idx, local_idx) → nicht überschreiben
+        self.takt_manual: set[tuple[int, int]] = set()
 
         # Drag-State
         self._drag_line_index = None
@@ -262,6 +264,7 @@ class StripApp:
         self.rotation_per_page = {}
         self.left_margin_per_page = {}
         self.takt_per_page = {}
+        self.takt_manual = set()
         self._update_rotation_ui()
         self.render_page()
         self.status.config(text=f"Geöffnet: {path}")
@@ -405,7 +408,7 @@ class StripApp:
         lst[local_idx] = value
 
     def _change_takt(self, page_idx, local_idx, delta):
-        """Ändert Taktzahl um delta und propagiert Folgestreifen."""
+        """Ändert Taktzahl um delta. Manuell gesetzte Folgestreifen bleiben unberührt."""
         strips = self._get_all_strips_with_takt()
         global_n = next((i for i, s in enumerate(strips)
                          if s[0] == page_idx and s[1] == local_idx), None)
@@ -413,9 +416,10 @@ class StripApp:
             return
 
         old_t = strips[global_n][4]
-        new_t = max(1, old_t + delta)
+        new_t = max(0, old_t + delta)   # 0 erlaubt (Titel-Streifen)
         strips[global_n][4] = new_t
         self._store_takt(page_idx, local_idx, new_t)
+        self.takt_manual.add((page_idx, local_idx))
 
         # Schritt für Propagation
         if global_n == 0:
@@ -424,10 +428,14 @@ class StripApp:
             step = new_t - strips[global_n - 1][4]
         step = max(1, step)
 
+        # Nur auto-berechnete Folgestreifen aktualisieren
         for k in range(global_n + 1, len(strips)):
+            p, l = strips[k][0], strips[k][1]
+            if (p, l) in self.takt_manual:
+                break   # ab hier alles manuell → stopp
             t = strips[k - 1][4] + step
             strips[k][4] = t
-            self._store_takt(strips[k][0], strips[k][1], t)
+            self._store_takt(p, l, t)
 
         self._draw_lines()
 
@@ -714,12 +722,16 @@ class StripApp:
                 takts = self.takt_per_page.get(self.page_index, [])
                 if len(takts) > n_after:
                     del takts[n_after:]
+                self.takt_manual = {(p, l) for p, l in self.takt_manual
+                                    if not (p == self.page_index and l >= n_after)}
             self._draw_lines()
             self.status.config(text="Letzte Linie entfernt.")
 
     def clear_lines(self):
         self.cuts_per_page[self.page_index] = []
         self.takt_per_page[self.page_index] = []
+        self.takt_manual = {(p, l) for p, l in self.takt_manual
+                            if p != self.page_index}
         self._draw_lines()
         self.status.config(text="Alle Linien dieser Seite gelöscht.")
 
@@ -750,14 +762,11 @@ class StripApp:
                                 fontsize=6, color=gray_light, align=2)
 
     def _collect_strips(self):
-        """Gibt alle Streifen in Reihenfolge zurück: [(page_idx, y_top, y_bot, rotation_deg), ...]"""
+        """Gibt alle Streifen in Reihenfolge zurück: [(page_idx, y_top, y_bot, rotation_deg, takt), ...]"""
         strips = []
-        for page_idx in sorted(self.cuts_per_page.keys()):
-            cuts = self.cuts_per_page[page_idx]
-            pairs = sorted(zip(cuts[::2], cuts[1::2]), key=lambda p: p[0])
+        for page_idx, local_idx, y_top, y_bot, takt in self._get_all_strips_with_takt():
             rotation = self.rotation_per_page.get(page_idx, 0.0)
-            for y_top, y_bot in pairs:
-                strips.append((page_idx, y_top, y_bot, rotation))
+            strips.append((page_idx, y_top, y_bot, rotation, takt))
         return strips
 
     def export_pdf(self):
@@ -782,12 +791,13 @@ class StripApp:
         cur_page = out_doc.new_page(width=A4_W, height=A4_H)
         cursor_y = OUT_MARGIN_TOP
 
-        for i, (page_idx, y_top, y_bot, rotation) in enumerate(strips):
+        for i, (page_idx, y_top, y_bot, rotation, takt) in enumerate(strips):
             src_page = self.doc[page_idx]
             left_x = self.left_margin_per_page.get(page_idx, src_page.rect.x0)
             clip = fitz.Rect(left_x, y_top, src_page.rect.x1, y_bot)
             strip_w = src_page.rect.x1 - left_x
             has_custom_margin = page_idx in self.left_margin_per_page
+            takt_label = f"[{takt}]" if self._show_takt.get() else None
 
             if rotation == 0:
                 # Vektorgrafik – keine Qualitätseinbusse
@@ -798,13 +808,15 @@ class StripApp:
                 x_off = OUT_MARGIN_LEFT if has_custom_margin else (A4_W - strip_w) / 2
                 dest = fitz.Rect(x_off, cursor_y, x_off + strip_w, cursor_y + strip_h)
                 cur_page.show_pdf_page(dest, self.doc, page_idx, clip=clip)
+                if takt_label:
+                    cur_page.insert_text(
+                        fitz.Point(x_off + 3, cursor_y + 9),
+                        takt_label, fontsize=8, color=(0.15, 0.15, 0.15)
+                    )
                 cursor_y += strip_h + OUT_GAP
 
             else:
                 # Beliebige Rotation: 300-DPI-Raster
-                # Wichtig: linken Rand NICHT als PDF-Clip setzen (würde nach Rotation
-                # eine diagonale Kante ergeben). Stattdessen volles Streifen-Bild rendern
-                # und danach mit PIL vertikal zuschneiden → WYSIWYG.
                 clip_full = fitz.Rect(src_page.rect.x0, y_top, src_page.rect.x1, y_bot)
                 mat = fitz.Matrix(EXPORT_SCALE, EXPORT_SCALE).prerotate(rotation)
                 pix = src_page.get_pixmap(matrix=mat, clip=clip_full)
@@ -812,6 +824,9 @@ class StripApp:
                 if has_custom_margin:
                     crop_x = int(left_x * EXPORT_SCALE)
                     img = img.crop((crop_x, 0, img.width, img.height))
+                if takt_label:
+                    draw = ImageDraw.Draw(img)
+                    draw.text((4, 4), takt_label, fill=(30, 30, 30))
                 # Pixmap-Grösse zurück in Punkte umrechnen
                 img_w_pt = img.width / EXPORT_SCALE
                 img_h_pt = img.height / EXPORT_SCALE
