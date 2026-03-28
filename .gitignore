@@ -12,6 +12,10 @@ exemples/
 # Ausgabe-PDFs
 *.pdf
 
+# PyInstaller
+build/
+dist/
+
 # OS
 .DS_Store
 Thumbs.db
