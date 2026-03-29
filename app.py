@@ -466,30 +466,62 @@ class StripApp:
                 break
 
     def _add_nullpunkt(self, x_canvas, y_canvas):
-        """Setzt einen Nullpunkt und erzeugt daraus direkt ein Streifen-Paar."""
+        """Setzt einen Nullpunkt sortiert nach Y und erzeugt das zugehörige Streifen-Paar."""
         x_pdf = x_canvas / self.scale
         y_pdf = y_canvas / self.scale
-        if self.page_index not in self._np_points:
-            self._np_points[self.page_index] = []
         page_height = self.doc[self.page_index].rect.height
+        points = self._np_points.setdefault(self.page_index, [])
+        cuts = self.cuts_per_page.setdefault(self.page_index, [])
+
         y_top = max(0.0, y_pdf - NP_MARGIN_TOP)
-        points = self._np_points[self.page_index]
-        if points:
-            # Streifenhöhe vom Abstand zum Vorgänger-System ableiten
-            _, _, prev_top = points[-1]
+
+        # Einfügeposition nach Y bestimmen
+        insert_pos = next((i for i, (_, yp, _) in enumerate(points) if yp > y_pdf),
+                          len(points))
+        prev = points[insert_pos - 1] if insert_pos > 0 else None
+        nxt  = points[insert_pos]     if insert_pos < len(points) else None
+
+        # Untergrenze: Abstand zum Vorgänger oder Nachfolger ableiten
+        if prev is not None:
+            _, _, prev_top = prev
             strip_h = y_top - prev_top
             y_bot = min(page_height, y_top + max(strip_h, NP_MARGIN_BOT))
-            # Untergrenze des Vorgänger-Streifens auf Oberkante dieses Streifens setzen
-            self._update_prev_np_bottom(y_top)
+        elif nxt is not None:
+            _, _, nxt_top = nxt
+            strip_h = nxt_top - y_top
+            y_bot = min(page_height, y_top + max(strip_h, NP_MARGIN_BOT))
         else:
             y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
-        self._np_points[self.page_index].append((x_pdf, y_pdf, y_top))
-        if self.page_index not in self.cuts_per_page:
-            self.cuts_per_page[self.page_index] = []
-        self.cuts_per_page[self.page_index].extend([y_top, y_bot])
-        n = len(self._np_points[self.page_index])
+
+        # _np_manual-Indizes für Nachfolger verschieben
+        self._np_manual = {
+            (p, k) if p != self.page_index or k < insert_pos else (p, k + 1)
+            for p, k in self._np_manual
+        }
+
+        # NP einfügen
+        points.insert(insert_pos, (x_pdf, y_pdf, y_top))
+
+        # Cuts einfügen: Position im cuts-Array = insert_pos * 2
+        cuts.insert(insert_pos * 2, y_top)
+        cuts.insert(insert_pos * 2 + 1, y_bot)
+
+        # Untergrenze des Vorgängers anpassen
+        if prev is not None:
+            _, _, prev_top = prev
+            for j in range(0, len(cuts) - 1, 2):
+                if abs(cuts[j] - prev_top) < 1.0:
+                    cuts[j + 1] = y_top - NP_BOTTOM_GAP
+                    break
+
+        # Obergrenze des Nachfolgers anpassen (Streifenhöhe beibehalten)
+        if nxt is not None:
+            _, _, nxt_top = nxt
+            cuts[insert_pos * 2 + 1] = nxt_top - NP_BOTTOM_GAP
+
+        n = len(points)
         self.status.config(
-            text=f"Nullpunkt {n} gesetzt (y={y_pdf:.0f} pt) → Streifen {y_top:.0f}–{y_bot:.0f} pt")
+            text=f"Nullpunkt {insert_pos + 1}/{n} gesetzt (y={y_pdf:.0f} pt)")
         self._draw_lines()
 
     def _draw_np_markers(self, page_height):
@@ -963,16 +995,16 @@ class StripApp:
         self._draw_lines()
 
     def _add_np_to_page(self, page_idx, x_pdf, y_pdf):
-        """NP direkt auf eine beliebige Seite setzen (ohne Canvas-Interaktion)."""
+        """NP ans Ende einer Seite anhängen (fill-Funktionen, immer aufsteigend)."""
         page = self.doc[page_idx]
         page_height = page.rect.height
         y_top = max(0.0, y_pdf - NP_MARGIN_TOP)
         points = self._np_points.setdefault(page_idx, [])
+        cuts = self.cuts_per_page.setdefault(page_idx, [])
         if points:
             _, _, prev_top = points[-1]
             strip_h = y_top - prev_top
             y_bot = min(page_height, y_top + max(strip_h, NP_MARGIN_BOT))
-            cuts = self.cuts_per_page.get(page_idx, [])
             for j in range(0, len(cuts) - 1, 2):
                 if abs(cuts[j] - prev_top) < 1.0:
                     cuts[j + 1] = y_top - NP_BOTTOM_GAP
@@ -980,7 +1012,7 @@ class StripApp:
         else:
             y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
         points.append((x_pdf, y_pdf, y_top))
-        self.cuts_per_page.setdefault(page_idx, []).extend([y_top, y_bot])
+        cuts.extend([y_top, y_bot])
 
     def _np_calibration(self, page_idx):
         """Gibt (dy, dx) aus den NPs einer Seite zurück, oder None."""
