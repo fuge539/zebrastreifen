@@ -846,7 +846,7 @@ class StripApp:
         # NP-Zone: linke X% der Seite
         if self._is_np_zone(x_canvas):
             for xp, yp, _ in self._np_points.get(self.page_index, []):
-                if abs(xp * self.scale - x_canvas) <= 8 and abs(yp * self.scale - y_canvas) <= 8:
+                if abs(xp * self.scale - x_canvas) <= 12 and abs(yp * self.scale - y_canvas) <= 12:
                     self.canvas.config(cursor="fleur")
                     return
             self.canvas.config(cursor="tcross")
@@ -896,6 +896,19 @@ class StripApp:
         if self.doc is None:
             return
         y_canvas = self.canvas.canvasy(event.y)
+        x_canvas = self.canvas.canvasx(event.x)
+
+        # NP-Rauten haben Priorität: immer zuerst prüfen (vor _find_nearby_line)
+        if self._is_np_zone(x_canvas):
+            points = self._np_points.get(self.page_index, [])
+            for i, (xp, yp, _) in enumerate(points):
+                if abs(xp * self.scale - x_canvas) <= 12 and abs(yp * self.scale - y_canvas) <= 12:
+                    self._drag_np_index = i
+                    self._drag_line_index = None
+                    self._drag_np_top_idx = None
+                    self.canvas.config(cursor="fleur")
+                    return
+
         idx = self._find_nearby_line(y_canvas)
         if idx is not None:
             # Drag-Modus: bestehende Linie verschieben
@@ -910,16 +923,9 @@ class StripApp:
                     self._drag_np_top_idx = self._find_np_by_top(cuts_now[idx])
         else:
             self._drag_line_index = None
-            x_canvas = self.canvas.canvasx(event.x)
 
-            # Nullpunkt-Zone: linke X% der Seite
+            # Nullpunkt-Zone: neuen NP setzen
             if self._is_np_zone(x_canvas):
-                points = self._np_points.get(self.page_index, [])
-                for i, (xp, yp, _) in enumerate(points):
-                    if abs(xp * self.scale - x_canvas) <= 8 and abs(yp * self.scale - y_canvas) <= 8:
-                        self._drag_np_index = i
-                        self.canvas.config(cursor="fleur")
-                        return
                 # NP nur in grauen Bereichen erlauben (nicht innerhalb Streifen)
                 if self._find_strip_at(y_canvas) is not None:
                     self.status.config(text="Nullpunkt nur ausserhalb bestehender Streifen setzen.")
@@ -1119,7 +1125,7 @@ class StripApp:
         if self._is_np_zone(x_canvas):
             points = self._np_points.get(self.page_index, [])
             for i, (xp, yp, _) in enumerate(points):
-                if abs(xp * self.scale - x_canvas) <= 8 and abs(yp * self.scale - y_canvas) <= 8:
+                if abs(xp * self.scale - x_canvas) <= 12 and abs(yp * self.scale - y_canvas) <= 12:
                     points.pop(i)
                     self.status.config(text="Nullpunkt entfernt (Schnittlinien bleiben).")
                     self._draw_lines()
