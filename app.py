@@ -75,7 +75,8 @@ class StripApp:
         # Aktuell angezeigte Seite als PhotoImage (muss als Referenz gehalten werden)
         self._photo = None
         self._page_img = None         # PIL-Kopie für Staff-Snap
-        self._snap_y: float | None = None   # aktueller Snap-Punkt (canvas-Koordinaten)
+        self._snap_y: float | None = None   # aktueller Y-Snap (canvas-Koordinaten)
+        self._snap_x: float | None = None   # aktueller X-Snap (canvas-Koordinaten)
 
         # Pro Seite: Taktzahlen je Streifen (Index = sortierte Streifen-Position)
         self.takt_per_page: dict[int, list[int]] = {}
@@ -601,8 +602,43 @@ class StripApp:
             return None
         return float(y0 + candidates[0])
 
+    def _snap_to_vertical(self, x_canvas, y_canvas, search_px=60):
+        """Sucht die nächste senkrechte Linie links/rechts vom Cursor.
+        Senkrechte Linie = dunkle Spalte mit niedriger Zeilen-Varianz."""
+        if self._page_img is None:
+            return None
+        img = self._page_img
+        x0 = max(0, int(x_canvas) - search_px)
+        x1 = min(img.width, int(x_canvas) + search_px)
+        y0 = max(0, int(y_canvas) - 20)
+        y1 = min(img.height, int(y_canvas) + 20)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        region = img.crop((x0, y0, x1, y1)).convert('L')
+        w, h = region.size
+        if w < 4 or h < 4:
+            return None
+        data = list(region.getdata())
+        cols = [[data[r * w + c] for r in range(h)] for c in range(w)]
+        col_avgs = [sum(c) / h for c in cols]
+        avg_all = sum(col_avgs) / len(col_avgs)
+        threshold = min(200, avg_all * 0.80)
+        candidates = []
+        for i, (avg, col) in enumerate(zip(col_avgs, cols)):
+            if avg >= threshold:
+                continue
+            variance = sum((v - avg) ** 2 for v in col) / h
+            if variance < 1200:
+                candidates.append(i)
+        if not candidates:
+            return None
+        # Nächste Spalte zum Cursor
+        cursor_rel = int(x_canvas) - x0
+        best = min(candidates, key=lambda c: abs(c - cursor_rel))
+        return float(x0 + best)
+
     def _draw_snap_indicator(self, y_canvas):
-        """Zeichnet einen kleinen Snap-Kreis auf dem Canvas (ohne _draw_lines)."""
+        """Zeichnet Y-Snap-Indikator in der NP-Zone."""
         self.canvas.delete("snap_indicator")
         if y_canvas is None:
             return
@@ -616,6 +652,20 @@ class StripApp:
         self.canvas.create_line(0, y_canvas, x_zone, y_canvas,
                                 fill="#00ff66", width=1, dash=(2, 4),
                                 tags="snap_indicator")
+
+    def _draw_snap_x_indicator(self, x_canvas):
+        """Zeichnet X-Snap-Indikator (senkrechte Linie)."""
+        self.canvas.delete("snap_x_indicator")
+        if x_canvas is None or self.doc is None:
+            return
+        h = self.doc[self.page_index].rect.height * self.scale
+        self.canvas.create_line(x_canvas, 0, x_canvas, h,
+                                fill="#00ccff", width=1, dash=(3, 5),
+                                tags="snap_x_indicator")
+        r = 6
+        self.canvas.create_oval(x_canvas - r, 0, x_canvas + r, r * 2,
+                                outline="#00ccff", width=2,
+                                tags="snap_x_indicator")
 
     def _find_np_by_top(self, y_val):
         """Gibt den NP-Index zurück, dessen orig_top mit y_val übereinstimmt, sonst None."""
@@ -992,13 +1042,20 @@ class StripApp:
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
         in_np_zone = self._is_np_zone(x_canvas) and self.doc is not None
-        # Snap immer berechnen wenn in NP-Zone (auch während Drag)
+        # Y-Snap in NP-Zone
         if in_np_zone:
             self._snap_y = self._snap_to_staff(x_canvas, y_canvas)
             self._draw_snap_indicator(self._snap_y)
         else:
             self._snap_y = None
             self.canvas.delete("snap_indicator")
+        # X-Snap überall (für linken Rand)
+        if self.doc is not None:
+            self._snap_x = self._snap_to_vertical(x_canvas, y_canvas)
+            self._draw_snap_x_indicator(self._snap_x)
+        else:
+            self._snap_x = None
+            self.canvas.delete("snap_x_indicator")
         if self._drag_line_index is not None or self._drag_np_index is not None:
             return
         self._update_cursor(x_canvas, y_canvas)
@@ -1055,7 +1112,8 @@ class StripApp:
 
             # Klick links im Streifen → linken Rand setzen
             if zone == 'left':
-                x_pdf = x_canvas / self.scale
+                x_eff = self._snap_x if self._snap_x is not None else x_canvas
+                x_pdf = x_eff / self.scale
                 self.left_margin_per_page[self.page_index] = x_pdf
                 self._draw_lines()
                 self.status.config(text=f"Linker Rand gesetzt: x={x_pdf:.1f} pt")
@@ -1326,8 +1384,9 @@ class StripApp:
                 self.status.config(text="Linker Rand entfernt.")
                 return
 
-        # 3. Sonst: linken Rand an X-Position setzen
-        x_pdf = x_canvas / self.scale
+        # 3. Sonst: linken Rand an X-Position setzen (mit X-Snap)
+        x_eff = self._snap_x if self._snap_x is not None else x_canvas
+        x_pdf = x_eff / self.scale
         self.left_margin_per_page[self.page_index] = x_pdf
         self._draw_lines()
         self.status.config(text=f"Linker Rand gesetzt: x={x_pdf:.1f} pt")
