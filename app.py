@@ -1185,10 +1185,10 @@ class StripApp:
                 self.left_margin_per_page[to_page] = inherited
 
     def _transfer_np_points(self, to_page):
-        """Erbt Nullpunkte von Seite to_page-2 (gleiche Scan-Seite, wie Rotation)."""
+        """Erbt Nullpunkte: zuerst von to_page-2 (Scan-Seite), sonst von to_page-1."""
         if to_page not in self._np_points:
-            inherited = self._np_points.get(to_page - 2)
-            if inherited is not None:
+            inherited = self._np_points.get(to_page - 2) or self._np_points.get(to_page - 1)
+            if inherited:
                 self._np_points[to_page] = list(inherited)
 
     def next_page(self):
