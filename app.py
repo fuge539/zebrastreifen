@@ -1092,15 +1092,24 @@ class StripApp:
         cuts.extend([y_top, y_bot])
 
     def _np_calibration(self, page_idx):
-        """Gibt (dy, dx) aus den NPs einer Seite zurück, oder None."""
+        """Gibt (dy, dx, x_base, einzug_dx) zurück, oder None.
+        x_base  = x-Position der regulären Systeme (ohne Einzug)
+        einzug_dx = Einzug von NP[0] relativ zu x_base (0 wenn kein Einzug)
+        """
         points = self._np_points.get(page_idx, [])
         if len(points) < 2:
             return None
         dys = [points[i+1][1] - points[i][1] for i in range(len(points)-1)]
-        dxs = [points[i+1][0] - points[i][0] for i in range(len(points)-1)]
         dy = sum(dys) / len(dys)
-        dx = sum(dxs) / len(dxs)
-        return (dy, dx) if dy > 0 else None
+        if dy <= 0:
+            return None
+        # x-Basis aus NP[1..n] (ohne NP[0], falls Einzug)
+        xs = [p[0] for p in points[1:]] if len(points) > 1 else [points[0][0]]
+        x_base = sum(xs) / len(xs)
+        dx = 0.0  # reguläre Systeme haben keinen x-Drift (Annahme)
+        # Einzug erkennen: NP[0].x > x_base + 10pt
+        einzug_dx = points[0][0] - x_base if points[0][0] > x_base + 10 else 0.0
+        return (dy, dx, x_base, einzug_dx)
 
     def np_fill_page(self):
         """Füllt die aktuelle Seite mit NPs basierend auf dem Abstand der letzten zwei NPs."""
@@ -1110,19 +1119,17 @@ class StripApp:
         if cal is None:
             self.status.config(text="Mindestens 2 Nullpunkte nötig zum Füllen.")
             return
-        dy, dx = cal
+        dy, dx, x_base, _ = cal
         points = self._np_points[self.page_index]
-        x_last, y_last, _ = points[-1]
+        _, y_last, _ = points[-1]
         page_height = self.doc[self.page_index].rect.height
         page_w = self.doc[self.page_index].rect.width
         added = 0
-        x_next, y_next = x_last + dx, y_last + dy
+        y_next = y_last + dy
         while y_next < page_height - NP_MARGIN_TOP:
             self._add_np_to_page(self.page_index,
-                                 max(0.0, min(x_next, page_w)), y_next)
-            x_last, y_last, _ = self._np_points[self.page_index][-1]
-            x_next = x_last + dx
-            y_next = y_last + dy
+                                 max(0.0, min(x_base, page_w)), y_next)
+            y_next += dy
             added += 1
         self._draw_lines()
         self.status.config(text=f"{added} Nullpunkt(e) ergänzt.")
@@ -1135,8 +1142,9 @@ class StripApp:
         if cal is None:
             self.status.config(text="Mindestens 2 Nullpunkte auf aktueller Seite nötig.")
             return
-        dy, dx = cal
+        dy, dx, x_base, einzug_dx = cal
         src_points = self._np_points[self.page_index]
+        y_start = src_points[0][1]
         filled = 0
         for page_idx in range(self.page_count):
             if self._np_points.get(page_idx):
@@ -1144,12 +1152,14 @@ class StripApp:
             page = self.doc[page_idx]
             page_h = page.rect.height
             page_w = page.rect.width
-            x_cur, y_cur = src_points[0][0], src_points[0][1]
+            y_cur = y_start
+            first = True
             while y_cur < page_h - NP_MARGIN_TOP:
+                x_cur = x_base + (einzug_dx if first else 0.0)
                 self._add_np_to_page(page_idx,
                                      max(0.0, min(x_cur, page_w)), y_cur)
-                x_cur += dx
                 y_cur += dy
+                first = False
             filled += 1
         self._draw_lines()
         self.status.config(text=f"{filled} Seite(n) mit NPs gefüllt.")
