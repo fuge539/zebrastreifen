@@ -34,7 +34,7 @@ A4_H = 841.890          # A4 Höhe in Punkten
 EXPORT_DPI        = 300       # Auflösung für rotierte Streifen
 EXPORT_SCALE      = EXPORT_DPI / 72
 
-NP_ZONE_FRAC  = 0.30          # linke 30 % der Seitenbreite = Nullpunkt-Zone
+NP_ZONE_FRAC  = 0.40          # linke 40 % der Seitenbreite = Nullpunkt-Zone
 NP_MARGIN_TOP = 8 * MM        # Abstand oberhalb Nullpunkt (Punkte)
 NP_MARGIN_BOT = 30 * MM       # Abstand unterhalb Nullpunkt (Punkte)
 NP_BOTTOM_GAP = 4 * MM        # Zusätzliche Lücke zwischen Streifen (Untergrenze = nächster NP − 12 mm)
@@ -600,7 +600,13 @@ class StripApp:
 
         if not candidates:
             return None
-        return float(y0 + candidates[0])
+        # Nächste dunkle Zeile zum Cursor (nicht die oberste der ganzen Region)
+        cursor_rel = int(y_canvas) - y0
+        best = min(candidates, key=lambda r: abs(r - cursor_rel))
+        # Nur snappen wenn nah genug (max 25px)
+        if abs(best - cursor_rel) > 25:
+            return None
+        return float(y0 + best)
 
     def _snap_to_vertical(self, x_canvas, y_canvas, search_px=60):
         """Sucht die nächste senkrechte Linie links/rechts vom Cursor.
