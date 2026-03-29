@@ -1326,14 +1326,19 @@ class StripApp:
         self.status.config(text=f"{filled} Seite(n) mit NPs gefüllt.")
 
     def on_drag(self, event):
+        x_canvas = self.canvas.canvasx(event.x)
+        y_canvas = self.canvas.canvasy(event.y)
+        # Platzierungs-Modus: Diamond folgt der Maus horizontal
+        if self._np_placing and self._np_placing_y is not None:
+            self._snap_x = self._snap_to_vertical(x_canvas, self._np_placing_y)
+            self._draw_snap_x_indicator(self._snap_x)
+            self._draw_snap_indicator(self._np_placing_y, x_cursor=x_canvas)
+            return
         if self._drag_np_index is not None and self.doc is not None:
-            self._drag_np(self._drag_np_index,
-                          self.canvas.canvasx(event.x),
-                          self.canvas.canvasy(event.y))
+            self._drag_np(self._drag_np_index, x_canvas, y_canvas)
             return
         if self._drag_line_index is None or self.doc is None:
             return
-        y_canvas = self.canvas.canvasy(event.y)
         y_pdf = self._canvas_to_pdf_y(y_canvas)
         page_height = self.doc[self.page_index].rect.height
         y_pdf = max(0, min(y_pdf, page_height))
