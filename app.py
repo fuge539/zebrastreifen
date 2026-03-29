@@ -135,6 +135,7 @@ class StripApp:
             ("Drag ◆",          "Nullpunkt verschieben"),
             ("Rechtsklick ◆",   "Nullpunkt entfernen"),
             ("⟳ NP füllen",    "Seite füllen (≥2 NP nötig)"),
+            ("⟳ Alle Seiten",  "Alle leeren Seiten füllen"),
             ("",                ""),
             ("Streifen-Zonen",   ""),
             ("↓ Klick (Mitte)",  "Unterkante verschieben"),
@@ -224,6 +225,7 @@ class StripApp:
         tk.Button(toolbar, text="Letzte Linie entfernen", command=self.remove_last_line).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Button(toolbar, text="Seite leeren", command=self.clear_lines).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Button(toolbar, text="⟳ NP füllen", command=self.np_fill_page).pack(side=tk.LEFT, padx=4, pady=2)
+        tk.Button(toolbar, text="⟳ Alle Seiten", command=self.np_fill_all_pages).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Label(toolbar, text="  Zoom:").pack(side=tk.LEFT)
         tk.Button(toolbar, text="−", width=2, command=self.zoom_out).pack(side=tk.LEFT, padx=2, pady=2)
         tk.Button(toolbar, text="+", width=2, command=self.zoom_in).pack(side=tk.LEFT, padx=2, pady=2)
@@ -890,34 +892,88 @@ class StripApp:
                     break
         self._draw_lines()
 
+    def _add_np_to_page(self, page_idx, x_pdf, y_pdf):
+        """NP direkt auf eine beliebige Seite setzen (ohne Canvas-Interaktion)."""
+        page = self.doc[page_idx]
+        page_height = page.rect.height
+        y_top = max(0.0, y_pdf - NP_MARGIN_TOP)
+        points = self._np_points.setdefault(page_idx, [])
+        if points:
+            _, _, prev_top = points[-1]
+            strip_h = y_top - prev_top
+            y_bot = min(page_height, y_top + max(strip_h, NP_MARGIN_BOT))
+            cuts = self.cuts_per_page.get(page_idx, [])
+            for j in range(len(cuts) - 1):
+                if abs(cuts[j] - prev_top) < 1.0:
+                    cuts[j + 1] = y_top
+                    break
+        else:
+            y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
+        points.append((x_pdf, y_pdf, y_top))
+        self.cuts_per_page.setdefault(page_idx, []).extend([y_top, y_bot])
+
+    def _np_calibration(self, page_idx):
+        """Gibt (dy, dx) aus den NPs einer Seite zurück, oder None."""
+        points = self._np_points.get(page_idx, [])
+        if len(points) < 2:
+            return None
+        dys = [points[i+1][1] - points[i][1] for i in range(len(points)-1)]
+        dxs = [points[i+1][0] - points[i][0] for i in range(len(points)-1)]
+        dy = sum(dys) / len(dys)
+        dx = sum(dxs) / len(dxs)
+        return (dy, dx) if dy > 0 else None
+
     def np_fill_page(self):
-        """Füllt die Seite mit NPs basierend auf dem Abstand der letzten zwei NPs."""
+        """Füllt die aktuelle Seite mit NPs basierend auf dem Abstand der letzten zwei NPs."""
         if self.doc is None:
             return
-        points = self._np_points.get(self.page_index, [])
-        if len(points) < 2:
+        cal = self._np_calibration(self.page_index)
+        if cal is None:
             self.status.config(text="Mindestens 2 Nullpunkte nötig zum Füllen.")
             return
-        # Abstand und X-Drift aus den letzten zwei NPs ableiten
-        x0, y0, _ = points[-2]
-        x1, y1, _ = points[-1]
-        dy = y1 - y0   # Systemabstand
-        dx = x1 - x0   # X-Drift (Schräge)
-        if dy <= 0:
-            self.status.config(text="NP-Abstand ungültig.")
-            return
+        dy, dx = cal
+        points = self._np_points[self.page_index]
+        x_last, y_last, _ = points[-1]
         page_height = self.doc[self.page_index].rect.height
         page_w = self.doc[self.page_index].rect.width
         added = 0
-        x_next, y_next = x1 + dx, y1 + dy
+        x_next, y_next = x_last + dx, y_last + dy
         while y_next < page_height - NP_MARGIN_TOP:
-            x_clamped = max(0.0, min(x_next, page_w))
-            self._add_nullpunkt(x_clamped * self.scale, y_next * self.scale)
+            self._add_np_to_page(self.page_index,
+                                 max(0.0, min(x_next, page_w)), y_next)
             x_last, y_last, _ = self._np_points[self.page_index][-1]
             x_next = x_last + dx
             y_next = y_last + dy
             added += 1
+        self._draw_lines()
         self.status.config(text=f"{added} Nullpunkt(e) ergänzt.")
+
+    def np_fill_all_pages(self):
+        """Füllt alle Seiten ohne NPs anhand der Kalibrierung der aktuellen Seite."""
+        if self.doc is None:
+            return
+        cal = self._np_calibration(self.page_index)
+        if cal is None:
+            self.status.config(text="Mindestens 2 Nullpunkte auf aktueller Seite nötig.")
+            return
+        dy, dx = cal
+        src_points = self._np_points[self.page_index]
+        filled = 0
+        for page_idx in range(self.page_count):
+            if self._np_points.get(page_idx):
+                continue   # bereits NPs vorhanden
+            page = self.doc[page_idx]
+            page_h = page.rect.height
+            page_w = page.rect.width
+            x_cur, y_cur = src_points[0][0], src_points[0][1]
+            while y_cur < page_h - NP_MARGIN_TOP:
+                self._add_np_to_page(page_idx,
+                                     max(0.0, min(x_cur, page_w)), y_cur)
+                x_cur += dx
+                y_cur += dy
+            filled += 1
+        self._draw_lines()
+        self.status.config(text=f"{filled} Seite(n) mit NPs gefüllt.")
 
     def on_drag(self, event):
         if self._drag_np_index is not None and self.doc is not None:
