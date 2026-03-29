@@ -75,8 +75,10 @@ class StripApp:
         # Aktuell angezeigte Seite als PhotoImage (muss als Referenz gehalten werden)
         self._photo = None
         self._page_img = None         # PIL-Kopie für Staff-Snap
-        self._snap_y: float | None = None   # aktueller Y-Snap (canvas-Koordinaten)
-        self._snap_x: float | None = None   # aktueller X-Snap (canvas-Koordinaten)
+        self._snap_y: float | None = None       # aktueller Y-Snap (canvas-Koordinaten)
+        self._snap_x: float | None = None       # aktueller X-Snap (canvas-Koordinaten)
+        self._np_placing: bool = False          # NP-Platzierung läuft (Y gesperrt, X per Drag)
+        self._np_placing_y: float | None = None # gesperrtes Y während Platzierung
 
         # Pro Seite: Taktzahlen je Streifen (Index = sortierte Streifen-Position)
         self.takt_per_page: dict[int, list[int]] = {}
@@ -479,11 +481,7 @@ class StripApp:
     def _add_nullpunkt(self, x_canvas, y_canvas):
         """Setzt einen Nullpunkt sortiert nach Y und erzeugt das zugehörige Streifen-Paar.
         Y snapt auf erkannte Notenlinie; X wird auf Scan-Offset gesetzt (nach Klammern)."""
-        if self._snap_y is not None:
-            y_canvas = self._snap_y
-        # X auf Scan-Position setzen (30px rechts = nach Klammern/Vorzeichen)
-        x_canvas = min(x_canvas + 30,
-                       self.doc[self.page_index].rect.width * self.scale - 1)
+        # Y und X kommen bereits korrekt (Y gesnappt, X per Drag gesetzt)
         x_pdf = x_canvas / self.scale
         y_pdf = y_canvas / self.scale
         page_height = self.doc[self.page_index].rect.height
@@ -643,21 +641,36 @@ class StripApp:
         best = min(candidates, key=lambda c: abs(c - cursor_rel))
         return float(x0 + best)
 
-    def _draw_snap_indicator(self, y_canvas):
-        """Zeichnet Y-Snap-Indikator in der NP-Zone."""
+    def _draw_snap_indicator(self, y_canvas, x_cursor=None):
+        """Zeichnet Y-Snap-Indikator. Wenn x_cursor gesetzt: Platzierungs-Modus."""
         self.canvas.delete("snap_indicator")
         if y_canvas is None:
             return
-        x_zone = (self.doc[self.page_index].rect.width * self.scale * NP_ZONE_FRAC
-                  if self.doc else 60)
-        r = 7
-        xc = x_zone / 2
-        self.canvas.create_oval(xc - r, y_canvas - r, xc + r, y_canvas + r,
-                                outline="#00ff66", width=2,
-                                tags="snap_indicator")
-        self.canvas.create_line(0, y_canvas, x_zone, y_canvas,
-                                fill="#00ff66", width=1, dash=(2, 4),
-                                tags="snap_indicator")
+        page_w = (self.doc[self.page_index].rect.width * self.scale if self.doc else 200)
+        x_zone = page_w * NP_ZONE_FRAC
+        if x_cursor is not None:
+            # Platzierungs-Modus: durchgezogene Y-Linie über volle Breite + X-Strich
+            self.canvas.create_line(0, y_canvas, page_w, y_canvas,
+                                    fill="#00ff66", width=1, dash=(4, 3),
+                                    tags="snap_indicator")
+            self.canvas.create_line(x_cursor, y_canvas - 16, x_cursor, y_canvas + 16,
+                                    fill="#00ccff", width=2,
+                                    tags="snap_indicator")
+            r = 7
+            self.canvas.create_oval(x_cursor - r, y_canvas - r,
+                                    x_cursor + r, y_canvas + r,
+                                    outline="#00ff66", fill="#004422", width=2,
+                                    tags="snap_indicator")
+        else:
+            # Hover-Modus: Kreis + kurze Linie in NP-Zone
+            r = 7
+            xc = x_zone / 2
+            self.canvas.create_oval(xc - r, y_canvas - r, xc + r, y_canvas + r,
+                                    outline="#00ff66", width=2,
+                                    tags="snap_indicator")
+            self.canvas.create_line(0, y_canvas, x_zone, y_canvas,
+                                    fill="#00ff66", width=1, dash=(2, 4),
+                                    tags="snap_indicator")
 
     def _draw_snap_x_indicator(self, x_canvas):
         """Zeichnet X-Snap-Indikator (senkrechte Linie)."""
@@ -1048,6 +1061,12 @@ class StripApp:
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
         in_np_zone = self._is_np_zone(x_canvas) and self.doc is not None
+        # Platzierungs-Modus: Y gesperrt, X per Drag
+        if self._np_placing and self._np_placing_y is not None:
+            self._draw_snap_indicator(self._np_placing_y, x_cursor=x_canvas)
+            self._snap_x = self._snap_to_vertical(x_canvas, self._np_placing_y)
+            self._draw_snap_x_indicator(self._snap_x)
+            return
         # Y-Snap in NP-Zone
         if in_np_zone:
             self._snap_y = self._snap_to_staff(x_canvas, y_canvas)
@@ -1109,7 +1128,12 @@ class StripApp:
                 if self._find_strip_at(y_canvas) is not None:
                     self.status.config(text="Nullpunkt nur ausserhalb bestehender Streifen setzen.")
                     return
-                self._add_nullpunkt(x_canvas, y_canvas)
+                # Y sperren, Platzierungs-Modus starten (X per Drag)
+                locked_y = self._snap_y if self._snap_y is not None else y_canvas
+                self._np_placing = True
+                self._np_placing_y = locked_y
+                self._draw_snap_indicator(locked_y, x_cursor=x_canvas)
+                self.canvas.config(cursor="sb_h_double_arrow")
                 return
 
             y_pdf = self._canvas_to_pdf_y(y_canvas)
@@ -1325,6 +1349,18 @@ class StripApp:
         self._draw_lines()
 
     def on_mouse_up(self, event):
+        x_canvas = self.canvas.canvasx(event.x)
+        y_canvas = self.canvas.canvasy(event.y)
+        # Platzierungs-Modus beenden: NP setzen
+        if self._np_placing and self._np_placing_y is not None:
+            self._np_placing = False
+            x_eff = self._snap_x if self._snap_x is not None else x_canvas
+            self._add_nullpunkt(x_eff, self._np_placing_y)
+            self._np_placing_y = None
+            self._snap_x = None
+            self.canvas.delete("snap_x_indicator")
+            self.canvas.delete("snap_indicator")
+            return
         self._drag_line_index = None
         self._drag_np_index = None
         self.canvas.delete("snap_indicator")
