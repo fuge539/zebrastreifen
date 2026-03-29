@@ -166,7 +166,7 @@ class StripApp:
                          anchor=tk.W).grid(row=row, column=1, sticky=tk.W)
 
         tk.Frame(win, height=1, bg="#ccc").pack(fill=tk.X, padx=20, pady=10)
-        tk.Label(win, text="© 2026 zebrastreifen",
+        tk.Label(win, text="Version 0.1  ·  © 2026 zebrastreifen",
                  font=("Helvetica", 8), fg="#888").pack(pady=(0, 16))
         tk.Button(win, text="Schliessen", command=win.destroy).pack(pady=(0, 16))
 
