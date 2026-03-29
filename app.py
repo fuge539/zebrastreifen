@@ -34,7 +34,7 @@ A4_H = 841.890          # A4 Höhe in Punkten
 EXPORT_DPI        = 300       # Auflösung für rotierte Streifen
 EXPORT_SCALE      = EXPORT_DPI / 72
 
-NP_ZONE_FRAC  = 0.22          # linke 22 % der Seitenbreite = Nullpunkt-Zone
+NP_ZONE_FRAC  = 0.30          # linke 30 % der Seitenbreite = Nullpunkt-Zone
 NP_MARGIN_TOP = 10 * MM       # Abstand oberhalb Nullpunkt (Punkte)
 NP_MARGIN_BOT = 30 * MM       # Abstand unterhalb Nullpunkt (Punkte)
 
@@ -95,8 +95,10 @@ class StripApp:
         # Seitenwechsel-Marker: (page_idx, local_idx) → neue Seite erzwingen
         self.pagebreak_set: set[tuple[int, int]] = set()
 
-        # Nullpunkte (Anfang Notensystem): pro Seite Liste von (x_pdf, y_pdf)
-        self._np_points: dict[int, list[tuple[float, float]]] = {}
+        # Nullpunkte (Anfang Notensystem): pro Seite Liste von (x_pdf, y_pdf, orig_top)
+        # orig_top = erzeugter top-Schnitt-Wert (dient als Anker beim Drag)
+        self._np_points: dict[int, list[tuple[float, float, float]]] = {}
+        self._drag_np_index: int | None = None   # Index in _np_points der aktuellen Seite
 
         self._build_ui()
         self._set_icon()
@@ -441,10 +443,10 @@ class StripApp:
         y_pdf = y_canvas / self.scale
         if self.page_index not in self._np_points:
             self._np_points[self.page_index] = []
-        self._np_points[self.page_index].append((x_pdf, y_pdf))
         page_height = self.doc[self.page_index].rect.height
         y_top = max(0.0, y_pdf - NP_MARGIN_TOP)
         y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
+        self._np_points[self.page_index].append((x_pdf, y_pdf, y_top))
         if self.page_index not in self.cuts_per_page:
             self.cuts_per_page[self.page_index] = []
         self.cuts_per_page[self.page_index].extend([y_top, y_bot])
@@ -461,7 +463,7 @@ class StripApp:
         self.canvas.create_line(x_zone, 0, x_zone, h,
                                 fill="#00bb44", width=1, dash=(3, 9),
                                 tags="line")
-        for x_pdf, y_pdf in self._np_points.get(self.page_index, []):
+        for x_pdf, y_pdf, _ in self._np_points.get(self.page_index, []):
             xc = x_pdf * self.scale
             yc = y_pdf * self.scale
             r = 6
@@ -721,9 +723,9 @@ class StripApp:
             return
         # NP-Zone: linke X% der Seite
         if self._is_np_zone(x_canvas):
-            for xp, yp in self._np_points.get(self.page_index, []):
+            for xp, yp, _ in self._np_points.get(self.page_index, []):
                 if abs(xp * self.scale - x_canvas) <= 8 and abs(yp * self.scale - y_canvas) <= 8:
-                    self.canvas.config(cursor="hand2")
+                    self.canvas.config(cursor="fleur")
                     return
             self.canvas.config(cursor="tcross")
             return
@@ -784,6 +786,12 @@ class StripApp:
 
             # Nullpunkt-Zone: linke X% der Seite
             if self._is_np_zone(x_canvas):
+                points = self._np_points.get(self.page_index, [])
+                for i, (xp, yp, _) in enumerate(points):
+                    if abs(xp * self.scale - x_canvas) <= 8 and abs(yp * self.scale - y_canvas) <= 8:
+                        self._drag_np_index = i
+                        self.canvas.config(cursor="fleur")
+                        return
                 self._add_nullpunkt(x_canvas, y_canvas)
                 return
 
@@ -822,7 +830,32 @@ class StripApp:
             self.status.config(text=f"Seite {self.page_index + 1}: {kind} Streifen {(n + 1) // 2} gesetzt (y={y_pdf:.1f} pt)")
             self._draw_lines()
 
+    def _drag_np(self, np_idx, x_canvas, y_canvas):
+        """Verschiebt einen Nullpunkt und aktualisiert das zugehörige Schnitt-Paar."""
+        points = self._np_points.get(self.page_index, [])
+        if np_idx >= len(points):
+            return
+        x_pdf = x_canvas / self.scale
+        y_pdf = y_canvas / self.scale
+        _, _, orig_top = points[np_idx]
+        page_height = self.doc[self.page_index].rect.height
+        new_top = max(0.0, y_pdf - NP_MARGIN_TOP)
+        new_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        for j in range(len(cuts) - 1):
+            if abs(cuts[j] - orig_top) < 1.0:
+                cuts[j]     = new_top
+                cuts[j + 1] = new_bot
+                break
+        points[np_idx] = (x_pdf, y_pdf, new_top)
+        self._draw_lines()
+
     def on_drag(self, event):
+        if self._drag_np_index is not None and self.doc is not None:
+            self._drag_np(self._drag_np_index,
+                          self.canvas.canvasx(event.x),
+                          self.canvas.canvasy(event.y))
+            return
         if self._drag_line_index is None or self.doc is None:
             return
         y_canvas = self.canvas.canvasy(event.y)
@@ -834,6 +867,7 @@ class StripApp:
 
     def on_mouse_up(self, event):
         self._drag_line_index = None
+        self._drag_np_index = None
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
         self._update_cursor(x_canvas, y_canvas)
@@ -851,7 +885,7 @@ class StripApp:
         # 0. NP-Zone: Rechtsklick auf Raute → Nullpunkt entfernen
         if self._is_np_zone(x_canvas):
             points = self._np_points.get(self.page_index, [])
-            for i, (xp, yp) in enumerate(points):
+            for i, (xp, yp, _) in enumerate(points):
                 if abs(xp * self.scale - x_canvas) <= 8 and abs(yp * self.scale - y_canvas) <= 8:
                     points.pop(i)
                     self.status.config(text="Nullpunkt entfernt (Schnittlinien bleiben).")
@@ -905,12 +939,18 @@ class StripApp:
             if inherited is not None:
                 self.left_margin_per_page[to_page] = inherited
 
+    def _transfer_np_points(self, from_page, to_page):
+        """Überträgt Nullpunkte von from_page auf to_page (falls to_page noch keine hat)."""
+        if to_page not in self._np_points and from_page in self._np_points:
+            self._np_points[to_page] = list(self._np_points[from_page])
+
     def next_page(self):
         if self.doc is None or self.page_index >= self.page_count - 1:
             return
         prev = self.page_index
         self.page_index += 1
         self._transfer_cuts(prev, self.page_index)
+        self._transfer_np_points(prev, self.page_index)
         self._transfer_rotation(self.page_index)
         self._transfer_left_margin(self.page_index)
         self._update_rotation_ui()
