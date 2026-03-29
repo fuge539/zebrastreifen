@@ -969,35 +969,62 @@ class StripApp:
             self._draw_lines()
 
     def _drag_np(self, np_idx, x_canvas, y_canvas):
-        """Verschiebt einen Nullpunkt und aktualisiert das zugehörige Schnitt-Paar."""
+        """Verschiebt einen Nullpunkt; alle folgenden auto-NPs bewegen sich mit (live)."""
         points = self._np_points.get(self.page_index, [])
         if np_idx >= len(points):
             return
         x_pdf = x_canvas / self.scale
         y_pdf = y_canvas / self.scale
-        _, _, orig_top = points[np_idx]
+        _, y_old, orig_top = points[np_idx]
         page_height = self.doc[self.page_index].rect.height
-        # NP-Reihenfolge erzwingen: nicht über Vorgänger oder Nachfolger hinaus
+        # NP-Reihenfolge erzwingen
         if np_idx > 0:
             y_pdf = max(y_pdf, points[np_idx - 1][1] + 1)
-        if np_idx < len(points) - 1:
-            y_pdf = min(y_pdf, points[np_idx + 1][1] - 1)
-        new_top = max(0.0, y_pdf - NP_MARGIN_TOP)
+        # Nachfolger werden mitgezogen → kein clamp nach unten nötig
+        delta_y = y_pdf - y_old
         cuts = self.cuts_per_page.get(self.page_index, [])
-        for j in range(len(cuts) - 1):
+
+        # Diesen NP verschieben
+        new_top = max(0.0, y_pdf - NP_MARGIN_TOP)
+        for j in range(0, len(cuts) - 1, 2):
             if abs(cuts[j] - orig_top) < 1.0:
-                old_height = cuts[j + 1] - cuts[j]   # bestehende Streifenhöhe beibehalten
+                old_height = cuts[j + 1] - cuts[j]
                 cuts[j]     = new_top
                 cuts[j + 1] = min(page_height, new_top + old_height)
                 break
         points[np_idx] = (x_pdf, y_pdf, new_top)
+
         # Untergrenze des Vorgänger-Streifens mitziehen
         if np_idx > 0:
             _, _, prev_orig_top = points[np_idx - 1]
-            for j in range(len(cuts) - 1):
+            for j in range(0, len(cuts) - 1, 2):
                 if abs(cuts[j] - prev_orig_top) < 1.0:
-                    cuts[j + 1] = new_top
+                    cuts[j + 1] = new_top - NP_BOTTOM_GAP
                     break
+
+        # Alle folgenden auto-NPs um delta_y verschieben
+        for k in range(np_idx + 1, len(points)):
+            if (self.page_index, k) in self._np_manual:
+                break
+            xk, yk, top_k = points[k]
+            new_yk = yk + delta_y
+            new_top_k = max(0.0, top_k + delta_y)
+            new_yk = max(new_yk, points[k - 1][1] + 1)
+            new_top_k = max(0.0, new_yk - NP_MARGIN_TOP)
+            for j in range(0, len(cuts) - 1, 2):
+                if abs(cuts[j] - top_k) < 1.0:
+                    old_h = cuts[j + 1] - cuts[j]
+                    cuts[j]     = new_top_k
+                    cuts[j + 1] = min(page_height, new_top_k + old_h)
+                    break
+            # Untergrenze von NP[k-1] anpassen
+            _, _, prev_top_k = points[k - 1]
+            for j in range(0, len(cuts) - 1, 2):
+                if abs(cuts[j] - prev_top_k) < 1.0:
+                    cuts[j + 1] = new_top_k - NP_BOTTOM_GAP
+                    break
+            points[k] = (xk, new_yk, new_top_k)
+
         self._draw_lines()
 
     def _add_np_to_page(self, page_idx, x_pdf, y_pdf):
