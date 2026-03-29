@@ -561,33 +561,42 @@ class StripApp:
             )
 
     def _snap_to_staff(self, x_canvas, y_canvas, search_px=60):
-        """Analysiert die gerenderte Seite rechts vom Cursor und sucht die oberste
-        Notenlinie in einem Fenster von ±search_px. Gibt canvas-y zurück oder None."""
+        """Sucht die oberste Notenlinie im Suchfenster.
+        Notenlinie = dunkle Zeile mit niedriger Varianz (horizontal durchgehend).
+        Senkrechte Linien/Klammern haben hohe Varianz → werden ignoriert.
+        Startet 30px rechts vom Cursor um Klammern/Taktstriche zu überspringen."""
         if self._page_img is None:
             return None
         img = self._page_img
-        # Streifen rechts vom Cursor (Notenlinien beginnen dort)
-        x0 = max(0, int(x_canvas))
-        x1 = min(img.width, x0 + 40)
+        # 30px Offset rechts: Klammern/Taktstriche überspringen
+        x0 = max(0, int(x_canvas) + 30)
+        x1 = min(img.width, x0 + 80)
         y0 = max(0, int(y_canvas) - search_px)
         y1 = min(img.height, int(y_canvas) + 15)
         if x1 <= x0 or y1 <= y0:
             return None
         region = img.crop((x0, y0, x1, y1)).convert('L')
         w, h = region.size
-        if w == 0 or h == 0:
+        if w < 10 or h == 0:
             return None
-        data = region.getdata()
-        # Zeilenmittelwerte berechnen
-        row_avgs = [sum(data[r * w:(r + 1) * w]) / w for r in range(h)]
-        # Schwellwert: deutlich dunkler als Durchschnitt
+        data = list(region.getdata())
+        rows = [data[r * w:(r + 1) * w] for r in range(h)]
+        row_avgs = [sum(r) / w for r in rows]
         avg_all = sum(row_avgs) / len(row_avgs)
-        threshold = min(180, avg_all * 0.75)
-        dark_rows = [i for i, v in enumerate(row_avgs) if v < threshold]
-        if not dark_rows:
+        threshold = min(200, avg_all * 0.80)
+
+        candidates = []
+        for i, (avg, row) in enumerate(zip(row_avgs, rows)):
+            if avg >= threshold:
+                continue
+            # Varianz der Zeile: Notenlinie hat niedrige Varianz (gleichmässig dunkel)
+            variance = sum((v - avg) ** 2 for v in row) / w
+            if variance < 1200:   # niedrige Varianz = horizontale Linie
+                candidates.append(i)
+
+        if not candidates:
             return None
-        # Oberste dunkle Zeile = erste Notenlinie
-        return float(y0 + dark_rows[0])
+        return float(y0 + candidates[0])
 
     def _draw_snap_indicator(self, y_canvas):
         """Zeichnet einen kleinen Snap-Kreis auf dem Canvas (ohne _draw_lines)."""
@@ -977,17 +986,19 @@ class StripApp:
         self.canvas.config(cursor="crosshair")
 
     def on_mouse_move(self, event):
-        if self._drag_line_index is not None or self._drag_np_index is not None:
-            return
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
-        self._update_cursor(x_canvas, y_canvas)
-        if self._is_np_zone(x_canvas) and self.doc is not None:
+        in_np_zone = self._is_np_zone(x_canvas) and self.doc is not None
+        # Snap immer berechnen wenn in NP-Zone (auch während Drag)
+        if in_np_zone:
             self._snap_y = self._snap_to_staff(x_canvas, y_canvas)
             self._draw_snap_indicator(self._snap_y)
         else:
             self._snap_y = None
             self.canvas.delete("snap_indicator")
+        if self._drag_line_index is not None or self._drag_np_index is not None:
+            return
+        self._update_cursor(x_canvas, y_canvas)
 
     def on_mouse_down(self, event):
         if self._takt_click_handled:
@@ -1072,6 +1083,8 @@ class StripApp:
 
     def _drag_np(self, np_idx, x_canvas, y_canvas):
         """Verschiebt einen Nullpunkt; alle folgenden auto-NPs bewegen sich mit (live)."""
+        if self._snap_y is not None:
+            y_canvas = self._snap_y
         points = self._np_points.get(self.page_index, [])
         if np_idx >= len(points):
             return
