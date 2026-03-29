@@ -500,10 +500,14 @@ class StripApp:
         else:
             y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
 
-        # _np_manual-Indizes für Nachfolger verschieben
+        # _np_manual-Indizes für Nachfolger verschieben (top und bot)
         self._np_manual = {
             (p, k) if p != self.page_index or k < insert_pos else (p, k + 1)
             for p, k in self._np_manual
+        }
+        self._np_manual_bot = {
+            (p, k) if p != self.page_index or k < insert_pos else (p, k + 1)
+            for p, k in self._np_manual_bot
         }
 
         # NP einfügen
@@ -513,8 +517,9 @@ class StripApp:
         cuts.insert(insert_pos * 2, y_top)
         cuts.insert(insert_pos * 2 + 1, y_bot)
 
-        # Untergrenze des Vorgängers anpassen
-        if prev is not None:
+        # Untergrenze des Vorgängers anpassen — nur wenn nicht manuell gesetzt
+        prev_np_idx = insert_pos - 1
+        if prev is not None and (self.page_index, prev_np_idx) not in self._np_manual_bot:
             _, _, prev_top = prev
             for j in range(0, len(cuts) - 1, 2):
                 if abs(cuts[j] - prev_top) < 1.0:
