@@ -583,7 +583,7 @@ class StripApp:
         w, h = region.size
         if w < 10 or h == 0:
             return None
-        data = list(region.getdata())
+        data = region.tobytes()   # bytes, direkt slicebar, kein getdata()
         rows = [data[r * w:(r + 1) * w] for r in range(h)]
         row_avgs = [sum(r) / w for r in rows]
         avg_all = sum(row_avgs) / len(row_avgs)
@@ -618,7 +618,7 @@ class StripApp:
         w, h = region.size
         if w < 4 or h < 4:
             return None
-        data = list(region.getdata())
+        data = region.tobytes()   # bytes, direkt indexierbar, kein getdata()
         cols = [[data[r * w + c] for r in range(h)] for c in range(w)]
         col_avgs = [sum(c) / h for c in cols]
         avg_all = sum(col_avgs) / len(col_avgs)
