@@ -816,6 +816,10 @@ class StripApp:
                         self._drag_np_index = i
                         self.canvas.config(cursor="fleur")
                         return
+                # NP nur in grauen Bereichen erlauben (nicht innerhalb Streifen)
+                if self._find_strip_at(y_canvas) is not None:
+                    self.status.config(text="Nullpunkt nur ausserhalb bestehender Streifen setzen.")
+                    return
                 self._add_nullpunkt(x_canvas, y_canvas)
                 return
 
@@ -1104,12 +1108,13 @@ class StripApp:
     def clear_lines(self):
         self.cuts_per_page[self.page_index] = []
         self.takt_per_page[self.page_index] = []
+        self._np_points[self.page_index] = []
         self.takt_manual = {(p, l) for p, l in self.takt_manual
                             if p != self.page_index}
         self.pagebreak_set = {(p, l) for p, l in self.pagebreak_set
                               if p != self.page_index}
         self._draw_lines()
-        self.status.config(text="Alle Linien dieser Seite gelöscht.")
+        self.status.config(text="Alle Linien und Nullpunkte dieser Seite gelöscht.")
 
     # -------------------------------------------------------- PDF-Export ----
 
