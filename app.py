@@ -34,6 +34,10 @@ A4_H = 841.890          # A4 Höhe in Punkten
 EXPORT_DPI        = 300       # Auflösung für rotierte Streifen
 EXPORT_SCALE      = EXPORT_DPI / 72
 
+NP_ZONE_FRAC  = 0.22          # linke 22 % der Seitenbreite = Nullpunkt-Zone
+NP_MARGIN_TOP = 10 * MM       # Abstand oberhalb Nullpunkt (Punkte)
+NP_MARGIN_BOT = 30 * MM       # Abstand unterhalb Nullpunkt (Punkte)
+
 # Export-Presets (page_w, page_h, margin_top, margin_bottom, margin_left, gap)
 EXPORT_PRESETS = {
     "komprimiert": (A4_W, A4_H,  8*MM, 18*MM,  5*MM,  3*MM),
@@ -91,6 +95,9 @@ class StripApp:
         # Seitenwechsel-Marker: (page_idx, local_idx) → neue Seite erzwingen
         self.pagebreak_set: set[tuple[int, int]] = set()
 
+        # Nullpunkte (Anfang Notensystem): pro Seite Liste von (x_pdf, y_pdf)
+        self._np_points: dict[int, list[tuple[float, float]]] = {}
+
         self._build_ui()
         self._set_icon()
 
@@ -120,6 +127,10 @@ class StripApp:
             ("Drag",            "Linie verschieben"),
             ("Rechtsklick",     "Linie löschen / linken Rand setzen"),
             ("Delete / ←",      "Letzte Linie entfernen"),
+            ("",                ""),
+            ("Nullpunkte (NP)",  ""),
+            ("← Klick (NP-Zone)","Nullpunkt + Streifen setzen"),
+            ("Rechtsklick ◆",   "Nullpunkt entfernen"),
             ("",                ""),
             ("Streifen-Zonen",   ""),
             ("↓ Klick (Mitte)",  "Unterkante verschieben"),
@@ -306,6 +317,7 @@ class StripApp:
         self.takt_per_page = {}
         self.takt_manual = set()
         self.pagebreak_set = set()
+        self._np_points = {}
         self._update_rotation_ui()
         self.render_page()
         self.status.config(text=f"Geöffnet: {path}")
@@ -348,6 +360,9 @@ class StripApp:
 
         # Streifen farbig hinterlegen
         self._draw_strips()
+
+        # Nullpunkt-Marker
+        self._draw_np_markers(page_height)
 
         # Seitenwechsel-Marker
         self._draw_pagebreak_markers(page_height)
@@ -410,6 +425,51 @@ class StripApp:
             self.canvas.create_line(x_canvas, 0, x_canvas, h,
                                     fill="#3399ff", width=2, dash=(6, 4),
                                     tags=("line", "left_margin"))
+
+    # ------------------------------------------------- Nullpunkte ------------
+
+    def _is_np_zone(self, x_canvas):
+        """True wenn x_canvas in der linken NP_ZONE_FRAC der Seitenbreite liegt."""
+        if self.doc is None:
+            return False
+        page_w = self.doc[self.page_index].rect.width * self.scale
+        return x_canvas < page_w * NP_ZONE_FRAC
+
+    def _add_nullpunkt(self, x_canvas, y_canvas):
+        """Setzt einen Nullpunkt und erzeugt daraus direkt ein Streifen-Paar."""
+        x_pdf = x_canvas / self.scale
+        y_pdf = y_canvas / self.scale
+        if self.page_index not in self._np_points:
+            self._np_points[self.page_index] = []
+        self._np_points[self.page_index].append((x_pdf, y_pdf))
+        page_height = self.doc[self.page_index].rect.height
+        y_top = max(0.0, y_pdf - NP_MARGIN_TOP)
+        y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
+        if self.page_index not in self.cuts_per_page:
+            self.cuts_per_page[self.page_index] = []
+        self.cuts_per_page[self.page_index].extend([y_top, y_bot])
+        n = len(self._np_points[self.page_index])
+        self.status.config(
+            text=f"Nullpunkt {n} gesetzt (y={y_pdf:.0f} pt) → Streifen {y_top:.0f}–{y_bot:.0f} pt")
+        self._draw_lines()
+
+    def _draw_np_markers(self, page_height):
+        """Zeichnet NP-Zonengrenze und Rauten an Nullpunkt-Positionen."""
+        page_w = self.doc[self.page_index].rect.width * self.scale
+        h = page_height * self.scale
+        x_zone = page_w * NP_ZONE_FRAC
+        self.canvas.create_line(x_zone, 0, x_zone, h,
+                                fill="#00bb44", width=1, dash=(3, 9),
+                                tags="line")
+        for x_pdf, y_pdf in self._np_points.get(self.page_index, []):
+            xc = x_pdf * self.scale
+            yc = y_pdf * self.scale
+            r = 6
+            self.canvas.create_polygon(
+                xc, yc - r, xc + r, yc, xc, yc + r, xc - r, yc,
+                fill="#00cc44", outline="#ffffff", width=1,
+                tags=("line", "np_marker")
+            )
 
     # ------------------------------------------------- Taktzahlen ------------
 
@@ -659,6 +719,14 @@ class StripApp:
         """Setzt den Cursor je nach Nähe zu einer Linie."""
         if self.doc is None:
             return
+        # NP-Zone: linke X% der Seite
+        if self._is_np_zone(x_canvas):
+            for xp, yp in self._np_points.get(self.page_index, []):
+                if abs(xp * self.scale - x_canvas) <= 8 and abs(yp * self.scale - y_canvas) <= 8:
+                    self.canvas.config(cursor="hand2")
+                    return
+            self.canvas.config(cursor="tcross")
+            return
         # Über Taktzahl-Label?
         items = self.canvas.find_overlapping(x_canvas - 1, y_canvas - 1,
                                              x_canvas + 1, y_canvas + 1)
@@ -713,6 +781,12 @@ class StripApp:
         else:
             self._drag_line_index = None
             x_canvas = self.canvas.canvasx(event.x)
+
+            # Nullpunkt-Zone: linke X% der Seite
+            if self._is_np_zone(x_canvas):
+                self._add_nullpunkt(x_canvas, y_canvas)
+                return
+
             y_pdf = self._canvas_to_pdf_y(y_canvas)
             page_height = self.doc[self.page_index].rect.height
             zone = self._strip_zone(x_canvas, y_canvas)
@@ -773,6 +847,17 @@ class StripApp:
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
         page_height = self.doc[self.page_index].rect.height
+
+        # 0. NP-Zone: Rechtsklick auf Raute → Nullpunkt entfernen
+        if self._is_np_zone(x_canvas):
+            points = self._np_points.get(self.page_index, [])
+            for i, (xp, yp) in enumerate(points):
+                if abs(xp * self.scale - x_canvas) <= 8 and abs(yp * self.scale - y_canvas) <= 8:
+                    points.pop(i)
+                    self.status.config(text="Nullpunkt entfernt (Schnittlinien bleiben).")
+                    self._draw_lines()
+                    return
+            return  # Kein Treffer: kein Standardverhalten in NP-Zone
 
         # 1. Nähe zu einer horizontalen Schnittlinie → löschen
         cuts = self.cuts_per_page.get(self.page_index, [])
