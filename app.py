@@ -437,6 +437,18 @@ class StripApp:
         page_w = self.doc[self.page_index].rect.width * self.scale
         return x_canvas < page_w * NP_ZONE_FRAC
 
+    def _update_prev_np_bottom(self, new_y_top):
+        """Setzt die Untergrenze des zuletzt gesetzten NP-Streifens auf new_y_top."""
+        points = self._np_points.get(self.page_index, [])
+        if len(points) == 0:
+            return
+        _, _, prev_orig_top = points[-1]
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        for j in range(len(cuts) - 1):
+            if abs(cuts[j] - prev_orig_top) < 1.0:
+                cuts[j + 1] = new_y_top
+                break
+
     def _add_nullpunkt(self, x_canvas, y_canvas):
         """Setzt einen Nullpunkt und erzeugt daraus direkt ein Streifen-Paar."""
         x_pdf = x_canvas / self.scale
@@ -446,6 +458,8 @@ class StripApp:
         page_height = self.doc[self.page_index].rect.height
         y_top = max(0.0, y_pdf - NP_MARGIN_TOP)
         y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
+        # Untergrenze des Vorgänger-Streifens auf Oberkante dieses Streifens setzen
+        self._update_prev_np_bottom(y_top)
         self._np_points[self.page_index].append((x_pdf, y_pdf, y_top))
         if self.page_index not in self.cuts_per_page:
             self.cuts_per_page[self.page_index] = []
@@ -848,6 +862,13 @@ class StripApp:
                 cuts[j + 1] = new_bot
                 break
         points[np_idx] = (x_pdf, y_pdf, new_top)
+        # Untergrenze des Vorgänger-Streifens mitziehen
+        if np_idx > 0:
+            _, _, prev_orig_top = points[np_idx - 1]
+            for j in range(len(cuts) - 1):
+                if abs(cuts[j] - prev_orig_top) < 1.0:
+                    cuts[j + 1] = new_top
+                    break
         self._draw_lines()
 
     def on_drag(self, event):
@@ -939,10 +960,12 @@ class StripApp:
             if inherited is not None:
                 self.left_margin_per_page[to_page] = inherited
 
-    def _transfer_np_points(self, from_page, to_page):
-        """Überträgt Nullpunkte von from_page auf to_page (falls to_page noch keine hat)."""
-        if to_page not in self._np_points and from_page in self._np_points:
-            self._np_points[to_page] = list(self._np_points[from_page])
+    def _transfer_np_points(self, to_page):
+        """Erbt Nullpunkte von Seite to_page-2 (gleiche Scan-Seite, wie Rotation)."""
+        if to_page not in self._np_points:
+            inherited = self._np_points.get(to_page - 2)
+            if inherited is not None:
+                self._np_points[to_page] = list(inherited)
 
     def next_page(self):
         if self.doc is None or self.page_index >= self.page_count - 1:
@@ -950,7 +973,7 @@ class StripApp:
         prev = self.page_index
         self.page_index += 1
         self._transfer_cuts(prev, self.page_index)
-        self._transfer_np_points(prev, self.page_index)
+        self._transfer_np_points(self.page_index)
         self._transfer_rotation(self.page_index)
         self._transfer_left_margin(self.page_index)
         self._update_rotation_ui()
