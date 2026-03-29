@@ -132,7 +132,9 @@ class StripApp:
             ("",                ""),
             ("Nullpunkte (NP)",  ""),
             ("← Klick (NP-Zone)","Nullpunkt + Streifen setzen"),
+            ("Drag ◆",          "Nullpunkt verschieben"),
             ("Rechtsklick ◆",   "Nullpunkt entfernen"),
+            ("⟳ NP füllen",    "Seite füllen (≥2 NP nötig)"),
             ("",                ""),
             ("Streifen-Zonen",   ""),
             ("↓ Klick (Mitte)",  "Unterkante verschieben"),
@@ -221,6 +223,7 @@ class StripApp:
         self.page_label.pack(side=tk.LEFT, padx=8)
         tk.Button(toolbar, text="Letzte Linie entfernen", command=self.remove_last_line).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Button(toolbar, text="Seite leeren", command=self.clear_lines).pack(side=tk.LEFT, padx=4, pady=2)
+        tk.Button(toolbar, text="⟳ NP füllen", command=self.np_fill_page).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Label(toolbar, text="  Zoom:").pack(side=tk.LEFT)
         tk.Button(toolbar, text="−", width=2, command=self.zoom_out).pack(side=tk.LEFT, padx=2, pady=2)
         tk.Button(toolbar, text="+", width=2, command=self.zoom_in).pack(side=tk.LEFT, padx=2, pady=2)
@@ -877,6 +880,35 @@ class StripApp:
                     cuts[j + 1] = new_top
                     break
         self._draw_lines()
+
+    def np_fill_page(self):
+        """Füllt die Seite mit NPs basierend auf dem Abstand der letzten zwei NPs."""
+        if self.doc is None:
+            return
+        points = self._np_points.get(self.page_index, [])
+        if len(points) < 2:
+            self.status.config(text="Mindestens 2 Nullpunkte nötig zum Füllen.")
+            return
+        # Abstand und X-Drift aus den letzten zwei NPs ableiten
+        x0, y0, _ = points[-2]
+        x1, y1, _ = points[-1]
+        dy = y1 - y0   # Systemabstand
+        dx = x1 - x0   # X-Drift (Schräge)
+        if dy <= 0:
+            self.status.config(text="NP-Abstand ungültig.")
+            return
+        page_height = self.doc[self.page_index].rect.height
+        page_w = self.doc[self.page_index].rect.width
+        added = 0
+        x_next, y_next = x1 + dx, y1 + dy
+        while y_next < page_height - NP_MARGIN_TOP:
+            x_clamped = max(0.0, min(x_next, page_w))
+            self._add_nullpunkt(x_clamped * self.scale, y_next * self.scale)
+            x_last, y_last, _ = self._np_points[self.page_index][-1]
+            x_next = x_last + dx
+            y_next = y_last + dy
+            added += 1
+        self.status.config(text=f"{added} Nullpunkt(e) ergänzt.")
 
     def on_drag(self, event):
         if self._drag_np_index is not None and self.doc is not None:
