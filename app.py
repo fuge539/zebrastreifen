@@ -572,11 +572,11 @@ class StripApp:
         if self._page_img is None:
             return None
         img = self._page_img
-        # 30px Offset rechts: Klammern/Taktstriche überspringen
-        x0 = max(0, int(x_canvas) + 30)
-        x1 = min(img.width, x0 + 80)
-        y0 = max(0, int(y_canvas) - search_px)
-        y1 = min(img.height, int(y_canvas) + 15)
+        # Rechts und unten vom Cursor suchen (Maus nähert sich von oben-links)
+        x0 = max(0, int(x_canvas) + 20)
+        x1 = min(img.width, x0 + 100)
+        y0 = max(0, int(y_canvas) - 8)   # wenig oberhalb
+        y1 = min(img.height, int(y_canvas) + search_px)  # hauptsächlich unterhalb
         if x1 <= x0 or y1 <= y0:
             return None
         region = img.crop((x0, y0, x1, y1)).convert('L')
