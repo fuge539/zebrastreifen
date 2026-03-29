@@ -74,6 +74,8 @@ class StripApp:
 
         # Aktuell angezeigte Seite als PhotoImage (muss als Referenz gehalten werden)
         self._photo = None
+        self._page_img = None         # PIL-Kopie für Staff-Snap
+        self._snap_y: float | None = None   # aktueller Snap-Punkt (canvas-Koordinaten)
 
         # Pro Seite: Taktzahlen je Streifen (Index = sortierte Streifen-Position)
         self.takt_per_page: dict[int, list[int]] = {}
@@ -348,6 +350,7 @@ class StripApp:
         mat = fitz.Matrix(self.scale, self.scale).prerotate(rotation)
         pix = page.get_pixmap(matrix=mat)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        self._page_img = img          # PIL-Kopie für Staff-Snap behalten
         self._photo = ImageTk.PhotoImage(img)
 
         self.canvas.delete("all")
@@ -473,7 +476,10 @@ class StripApp:
                 break
 
     def _add_nullpunkt(self, x_canvas, y_canvas):
-        """Setzt einen Nullpunkt sortiert nach Y und erzeugt das zugehörige Streifen-Paar."""
+        """Setzt einen Nullpunkt sortiert nach Y und erzeugt das zugehörige Streifen-Paar.
+        Verwendet _snap_y wenn aktiv (magnetischer Snap auf Notenlinie)."""
+        if self._snap_y is not None:
+            y_canvas = self._snap_y
         x_pdf = x_canvas / self.scale
         y_pdf = y_canvas / self.scale
         page_height = self.doc[self.page_index].rect.height
@@ -553,6 +559,51 @@ class StripApp:
                 fill="#00cc44", outline="#ffffff", width=1,
                 tags=("line", "np_marker")
             )
+
+    def _snap_to_staff(self, x_canvas, y_canvas, search_px=60):
+        """Analysiert die gerenderte Seite rechts vom Cursor und sucht die oberste
+        Notenlinie in einem Fenster von ±search_px. Gibt canvas-y zurück oder None."""
+        if self._page_img is None:
+            return None
+        img = self._page_img
+        # Streifen rechts vom Cursor (Notenlinien beginnen dort)
+        x0 = max(0, int(x_canvas))
+        x1 = min(img.width, x0 + 40)
+        y0 = max(0, int(y_canvas) - search_px)
+        y1 = min(img.height, int(y_canvas) + 15)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        region = img.crop((x0, y0, x1, y1)).convert('L')
+        w, h = region.size
+        if w == 0 or h == 0:
+            return None
+        data = region.getdata()
+        # Zeilenmittelwerte berechnen
+        row_avgs = [sum(data[r * w:(r + 1) * w]) / w for r in range(h)]
+        # Schwellwert: deutlich dunkler als Durchschnitt
+        avg_all = sum(row_avgs) / len(row_avgs)
+        threshold = min(180, avg_all * 0.75)
+        dark_rows = [i for i, v in enumerate(row_avgs) if v < threshold]
+        if not dark_rows:
+            return None
+        # Oberste dunkle Zeile = erste Notenlinie
+        return float(y0 + dark_rows[0])
+
+    def _draw_snap_indicator(self, y_canvas):
+        """Zeichnet einen kleinen Snap-Kreis auf dem Canvas (ohne _draw_lines)."""
+        self.canvas.delete("snap_indicator")
+        if y_canvas is None:
+            return
+        x_zone = (self.doc[self.page_index].rect.width * self.scale * NP_ZONE_FRAC
+                  if self.doc else 60)
+        r = 7
+        xc = x_zone / 2
+        self.canvas.create_oval(xc - r, y_canvas - r, xc + r, y_canvas + r,
+                                outline="#00ff66", width=2,
+                                tags="snap_indicator")
+        self.canvas.create_line(0, y_canvas, x_zone, y_canvas,
+                                fill="#00ff66", width=1, dash=(2, 4),
+                                tags="snap_indicator")
 
     def _find_np_by_top(self, y_val):
         """Gibt den NP-Index zurück, dessen orig_top mit y_val übereinstimmt, sonst None."""
@@ -926,10 +977,17 @@ class StripApp:
         self.canvas.config(cursor="crosshair")
 
     def on_mouse_move(self, event):
-        if self._drag_line_index is not None:
+        if self._drag_line_index is not None or self._drag_np_index is not None:
             return
-        self._update_cursor(self.canvas.canvasx(event.x),
-                            self.canvas.canvasy(event.y))
+        x_canvas = self.canvas.canvasx(event.x)
+        y_canvas = self.canvas.canvasy(event.y)
+        self._update_cursor(x_canvas, y_canvas)
+        if self._is_np_zone(x_canvas) and self.doc is not None:
+            self._snap_y = self._snap_to_staff(x_canvas, y_canvas)
+            self._draw_snap_indicator(self._snap_y)
+        else:
+            self._snap_y = None
+            self.canvas.delete("snap_indicator")
 
     def on_mouse_down(self, event):
         if self._takt_click_handled:
@@ -1188,6 +1246,7 @@ class StripApp:
     def on_mouse_up(self, event):
         self._drag_line_index = None
         self._drag_np_index = None
+        self.canvas.delete("snap_indicator")
         if self._drag_np_top_idx is not None:
             self._np_manual.add((self.page_index, self._drag_np_top_idx))
             self._drag_np_top_idx = None
