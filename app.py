@@ -867,6 +867,11 @@ class StripApp:
         y_pdf = y_canvas / self.scale
         _, _, orig_top = points[np_idx]
         page_height = self.doc[self.page_index].rect.height
+        # NP-Reihenfolge erzwingen: nicht über Vorgänger oder Nachfolger hinaus
+        if np_idx > 0:
+            y_pdf = max(y_pdf, points[np_idx - 1][1] + 1)
+        if np_idx < len(points) - 1:
+            y_pdf = min(y_pdf, points[np_idx + 1][1] - 1)
         new_top = max(0.0, y_pdf - NP_MARGIN_TOP)
         cuts = self.cuts_per_page.get(self.page_index, [])
         for j in range(len(cuts) - 1):
