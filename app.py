@@ -649,18 +649,16 @@ class StripApp:
         page_w = (self.doc[self.page_index].rect.width * self.scale if self.doc else 200)
         x_zone = page_w * NP_ZONE_FRAC
         if x_cursor is not None:
-            # Platzierungs-Modus: durchgezogene Y-Linie über volle Breite + X-Strich
+            # Platzierungs-Modus: Y-Linie + Diamond live bei (x_cursor, y_canvas)
             self.canvas.create_line(0, y_canvas, page_w, y_canvas,
                                     fill="#00ff66", width=1, dash=(4, 3),
                                     tags="snap_indicator")
-            self.canvas.create_line(x_cursor, y_canvas - 16, x_cursor, y_canvas + 16,
-                                    fill="#00ccff", width=2,
-                                    tags="snap_indicator")
-            r = 7
-            self.canvas.create_oval(x_cursor - r, y_canvas - r,
-                                    x_cursor + r, y_canvas + r,
-                                    outline="#00ff66", fill="#004422", width=2,
-                                    tags="snap_indicator")
+            r = 8
+            xc, yc = x_cursor, y_canvas
+            self.canvas.create_polygon(
+                xc, yc - r, xc + r, yc, xc, yc + r, xc - r, yc,
+                fill="#004422", outline="#00ff66", width=2,
+                tags="snap_indicator")
         else:
             # Hover-Modus: Kreis + kurze Linie in NP-Zone
             r = 7
