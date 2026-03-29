@@ -35,8 +35,9 @@ EXPORT_DPI        = 300       # Auflösung für rotierte Streifen
 EXPORT_SCALE      = EXPORT_DPI / 72
 
 NP_ZONE_FRAC  = 0.30          # linke 30 % der Seitenbreite = Nullpunkt-Zone
-NP_MARGIN_TOP = 10 * MM       # Abstand oberhalb Nullpunkt (Punkte)
+NP_MARGIN_TOP = 8 * MM        # Abstand oberhalb Nullpunkt (Punkte)
 NP_MARGIN_BOT = 30 * MM       # Abstand unterhalb Nullpunkt (Punkte)
+NP_BOTTOM_GAP = 4 * MM        # Zusätzliche Lücke zwischen Streifen (Untergrenze = nächster NP − 12 mm)
 
 # Export-Presets (page_w, page_h, margin_top, margin_bottom, margin_left, gap)
 EXPORT_PRESETS = {
@@ -98,7 +99,10 @@ class StripApp:
         # Nullpunkte (Anfang Notensystem): pro Seite Liste von (x_pdf, y_pdf, orig_top)
         # orig_top = erzeugter top-Schnitt-Wert (dient als Anker beim Drag)
         self._np_points: dict[int, list[tuple[float, float, float]]] = {}
-        self._drag_np_index: int | None = None   # Index in _np_points der aktuellen Seite
+        self._drag_np_index: int | None = None      # NP-Raute wird gezogen
+        self._drag_np_top_idx: int | None = None    # NP-Oberkante (rote Linie) wird gezogen
+        # Manuell korrigierte NP-Obergrenzen: (page_idx, np_idx) → nicht überschreiben
+        self._np_manual: set[tuple[int, int]] = set()
 
         self._build_ui()
         self._set_icon()
@@ -325,6 +329,7 @@ class StripApp:
         self.takt_manual = set()
         self.pagebreak_set = set()
         self._np_points = {}
+        self._np_manual = set()
         self._update_rotation_ui()
         self.render_page()
         self.status.config(text=f"Geöffnet: {path}")
@@ -356,12 +361,17 @@ class StripApp:
 
         for i, y_pdf in enumerate(cuts):
             y_canvas = self._pdf_to_canvas_y(y_pdf, page_height)
-            # Abwechselnd: gerade = oben (rot), ungerade = unten (grün)
             color = "#e74c3c" if i % 2 == 0 else "#2ecc71"
             label = "oben" if i % 2 == 0 else "unten"
             w = int(self.doc[self.page_index].rect.width * self.scale)
+            # Gestrichelt = auto (NP), durchgezogen = manuell
+            ref_top = cuts[i] if i % 2 == 0 else (cuts[i - 1] if i > 0 else None)
+            np_idx = self._find_np_by_top(ref_top) if ref_top is not None else None
+            auto = np_idx is not None and (self.page_index, np_idx) not in self._np_manual
+            dash = (6, 4) if auto else ()
             self.canvas.create_line(0, y_canvas, w, y_canvas,
-                                    fill=color, width=2, tags=("line", f"line_{i}"))
+                                    fill=color, width=2, dash=dash,
+                                    tags=("line", f"line_{i}"))
             self.canvas.create_text(8, y_canvas - 8, text=f"{label} {i // 2 + 1}",
                                     fill=color, anchor=tk.W, tags="line")
 
@@ -443,15 +453,16 @@ class StripApp:
         return x_canvas < page_w * NP_ZONE_FRAC
 
     def _update_prev_np_bottom(self, new_y_top):
-        """Setzt die Untergrenze des zuletzt gesetzten NP-Streifens auf new_y_top."""
+        """Setzt die Untergrenze des zuletzt gesetzten NP-Streifens (mit Lücke)."""
         points = self._np_points.get(self.page_index, [])
         if len(points) == 0:
             return
         _, _, prev_orig_top = points[-1]
         cuts = self.cuts_per_page.get(self.page_index, [])
-        for j in range(len(cuts) - 1):
+        # Nur gerade Indizes (Obergrenzen) durchsuchen — verhindert Verwechslung mit Untergrenzen
+        for j in range(0, len(cuts) - 1, 2):
             if abs(cuts[j] - prev_orig_top) < 1.0:
-                cuts[j + 1] = new_y_top
+                cuts[j + 1] = new_y_top - NP_BOTTOM_GAP
                 break
 
     def _add_nullpunkt(self, x_canvas, y_canvas):
@@ -498,6 +509,59 @@ class StripApp:
                 fill="#00cc44", outline="#ffffff", width=1,
                 tags=("line", "np_marker")
             )
+
+    def _find_np_by_top(self, y_val):
+        """Gibt den NP-Index zurück, dessen orig_top mit y_val übereinstimmt, sonst None."""
+        if y_val is None:
+            return None
+        for i, (_, _, orig_top) in enumerate(self._np_points.get(self.page_index, [])):
+            if abs(orig_top - y_val) < 1.0:
+                return i
+        return None
+
+    def _propagate_np_top(self, np_idx, new_top):
+        """Propagiert geänderten Top-Offset zu allen folgenden nicht-manuellen NPs."""
+        points = self._np_points.get(self.page_index, [])
+        if np_idx >= len(points):
+            return
+        x_np, y_np, _ = points[np_idx]
+        new_offset = y_np - new_top
+        points[np_idx] = (x_np, y_np, new_top)
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        for k in range(np_idx + 1, len(points)):
+            if (self.page_index, k) in self._np_manual:
+                break
+            xk, yk, old_top_k = points[k]
+            new_top_k = yk - new_offset
+            for j in range(0, len(cuts) - 1, 2):
+                if abs(cuts[j] - old_top_k) < 1.0:
+                    cuts[j] = new_top_k
+                    break
+            points[k] = (xk, yk, new_top_k)
+
+    def _delete_np_and_strip(self, np_idx):
+        """Löscht einen Nullpunkt und das zugehörige Streifen-Paar."""
+        points = self._np_points.get(self.page_index, [])
+        if np_idx >= len(points):
+            return
+        _, _, orig_top = points[np_idx]
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        for j in range(0, len(cuts) - 1, 2):
+            if abs(cuts[j] - orig_top) < 1.0:
+                del cuts[j:j + 2]
+                break
+        points.pop(np_idx)
+        new_manual = set()
+        for p, k in self._np_manual:
+            if p != self.page_index:
+                new_manual.add((p, k))
+            elif k < np_idx:
+                new_manual.add((p, k))
+            elif k > np_idx:
+                new_manual.add((p, k - 1))
+        self._np_manual = new_manual
+        self._draw_lines()
+        self.status.config(text="Nullpunkt und Streifen gelöscht.")
 
     # ------------------------------------------------- Taktzahlen ------------
 
@@ -806,6 +870,12 @@ class StripApp:
             self._drag_line_index = idx
             self._drag_start_y = y_canvas
             self.canvas.config(cursor="fleur")
+            # Erkennen ob NP-Oberkante gezogen wird
+            self._drag_np_top_idx = None
+            if idx % 2 == 0:
+                cuts_now = self.cuts_per_page.get(self.page_index, [])
+                if idx < len(cuts_now):
+                    self._drag_np_top_idx = self._find_np_by_top(cuts_now[idx])
         else:
             self._drag_line_index = None
             x_canvas = self.canvas.canvasx(event.x)
@@ -903,9 +973,9 @@ class StripApp:
             strip_h = y_top - prev_top
             y_bot = min(page_height, y_top + max(strip_h, NP_MARGIN_BOT))
             cuts = self.cuts_per_page.get(page_idx, [])
-            for j in range(len(cuts) - 1):
+            for j in range(0, len(cuts) - 1, 2):
                 if abs(cuts[j] - prev_top) < 1.0:
-                    cuts[j + 1] = y_top
+                    cuts[j + 1] = y_top - NP_BOTTOM_GAP
                     break
         else:
             y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
@@ -988,11 +1058,17 @@ class StripApp:
         page_height = self.doc[self.page_index].rect.height
         y_pdf = max(0, min(y_pdf, page_height))
         self.cuts_per_page[self.page_index][self._drag_line_index] = y_pdf
+        # NP-Oberkante: Offset zu allen folgenden auto-NPs propagieren
+        if self._drag_np_top_idx is not None:
+            self._propagate_np_top(self._drag_np_top_idx, y_pdf)
         self._draw_lines()
 
     def on_mouse_up(self, event):
         self._drag_line_index = None
         self._drag_np_index = None
+        if self._drag_np_top_idx is not None:
+            self._np_manual.add((self.page_index, self._drag_np_top_idx))
+            self._drag_np_top_idx = None
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
         self._update_cursor(x_canvas, y_canvas)
@@ -1018,11 +1094,23 @@ class StripApp:
                     return
             return  # Kein Treffer: kein Standardverhalten in NP-Zone
 
-        # 1. Nähe zu einer horizontalen Schnittlinie → löschen
+        # 1. Nähe zu einer horizontalen Schnittlinie → smartes Löschen
         cuts = self.cuts_per_page.get(self.page_index, [])
-        for i, y_pdf in enumerate(cuts):
-            yc = self._pdf_to_canvas_y(y_pdf, page_height)
+        for i, y_pdf_cut in enumerate(cuts):
+            yc = self._pdf_to_canvas_y(y_pdf_cut, page_height)
             if abs(yc - y_canvas) <= DRAG_TOLERANCE:
+                if i % 2 == 0:  # Oberkante (rot)
+                    np_idx = self._find_np_by_top(y_pdf_cut)
+                    if np_idx is not None:
+                        if (self.page_index, np_idx) in self._np_manual:
+                            # Durchgezogen → gestrichelt (Manual-Flag entfernen)
+                            self._np_manual.discard((self.page_index, np_idx))
+                            self._draw_lines()
+                            self.status.config(text="Manuelle Korrektur zurückgesetzt (NP aktiv).")
+                        else:
+                            # Gestrichelt → NP + Streifen löschen
+                            self._delete_np_and_strip(np_idx)
+                        return
                 cuts.pop(i)
                 self._draw_lines()
                 self.status.config(text="Linie gelöscht.")
@@ -1170,6 +1258,7 @@ class StripApp:
         self.cuts_per_page[self.page_index] = []
         self.takt_per_page[self.page_index] = []
         self._np_points[self.page_index] = []
+        self._np_manual = {(p, k) for p, k in self._np_manual if p != self.page_index}
         self.takt_manual = {(p, l) for p, l in self.takt_manual
                             if p != self.page_index}
         self.pagebreak_set = {(p, l) for p, l in self.pagebreak_set
