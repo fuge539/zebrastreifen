@@ -477,9 +477,12 @@ class StripApp:
 
     def _add_nullpunkt(self, x_canvas, y_canvas):
         """Setzt einen Nullpunkt sortiert nach Y und erzeugt das zugehörige Streifen-Paar.
-        Verwendet _snap_y wenn aktiv (magnetischer Snap auf Notenlinie)."""
+        Y snapt auf erkannte Notenlinie; X wird auf Scan-Offset gesetzt (nach Klammern)."""
         if self._snap_y is not None:
             y_canvas = self._snap_y
+        # X auf Scan-Position setzen (30px rechts = nach Klammern/Vorzeichen)
+        x_canvas = min(x_canvas + 30,
+                       self.doc[self.page_index].rect.width * self.scale - 1)
         x_pdf = x_canvas / self.scale
         y_pdf = y_canvas / self.scale
         page_height = self.doc[self.page_index].rect.height
@@ -1082,12 +1085,13 @@ class StripApp:
             self._draw_lines()
 
     def _drag_np(self, np_idx, x_canvas, y_canvas):
-        """Verschiebt einen Nullpunkt; alle folgenden auto-NPs bewegen sich mit (live)."""
-        if self._snap_y is not None:
-            y_canvas = self._snap_y
+        """Verschiebt einen Nullpunkt. Y snapt auf Notenlinie; X ist frei anpassbar."""
         points = self._np_points.get(self.page_index, [])
         if np_idx >= len(points):
             return
+        # Y: snap wenn verfügbar, sonst freie Bewegung
+        if self._snap_y is not None:
+            y_canvas = self._snap_y
         x_pdf = x_canvas / self.scale
         y_pdf = y_canvas / self.scale
         _, y_old, orig_top = points[np_idx]
