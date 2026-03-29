@@ -101,8 +101,11 @@ class StripApp:
         self._np_points: dict[int, list[tuple[float, float, float]]] = {}
         self._drag_np_index: int | None = None      # NP-Raute wird gezogen
         self._drag_np_top_idx: int | None = None    # NP-Oberkante (rote Linie) wird gezogen
-        # Manuell korrigierte NP-Obergrenzen: (page_idx, np_idx) → nicht überschreiben
+        self._drag_np_bot_idx: int | None = None    # NP-Untergrenze (grüne Linie) wird gezogen
+        # Gesetzte NP-Obergrenzen: (page_idx, np_idx) → nicht überschreiben
         self._np_manual: set[tuple[int, int]] = set()
+        # Gesetzte NP-Untergrenzen: (page_idx, np_idx) → nicht von _update_prev_np_bottom überschreiben
+        self._np_manual_bot: set[tuple[int, int]] = set()
 
         self._build_ui()
         self._set_icon()
@@ -330,6 +333,7 @@ class StripApp:
         self.pagebreak_set = set()
         self._np_points = {}
         self._np_manual = set()
+        self._np_manual_bot = set()
         self._update_rotation_ui()
         self.render_page()
         self.status.config(text=f"Geöffnet: {path}")
@@ -453,13 +457,16 @@ class StripApp:
         return x_canvas < page_w * NP_ZONE_FRAC
 
     def _update_prev_np_bottom(self, new_y_top):
-        """Setzt die Untergrenze des zuletzt gesetzten NP-Streifens (mit Lücke)."""
+        """Setzt die Untergrenze des zuletzt gesetzten NP-Streifens (mit Lücke).
+        Überspringt wenn die Untergrenze bereits manuell/per Propagation gesetzt wurde."""
         points = self._np_points.get(self.page_index, [])
         if len(points) == 0:
             return
-        _, _, prev_orig_top = points[-1]
+        prev_idx = len(points) - 1
+        if (self.page_index, prev_idx) in self._np_manual_bot:
+            return
+        _, _, prev_orig_top = points[prev_idx]
         cuts = self.cuts_per_page.get(self.page_index, [])
-        # Nur gerade Indizes (Obergrenzen) durchsuchen — verhindert Verwechslung mit Untergrenzen
         for j in range(0, len(cuts) - 1, 2):
             if abs(cuts[j] - prev_orig_top) < 1.0:
                 cuts[j + 1] = new_y_top - NP_BOTTOM_GAP
@@ -570,6 +577,36 @@ class StripApp:
                     cuts[j] = new_top_k
                     break
             points[k] = (xk, yk, new_top_k)
+
+    def _propagate_np_bot(self, np_idx, new_bot):
+        """Propagiert geänderte Untergrenze zu allen folgenden nicht-manuellen NP-Untergrenzen."""
+        points = self._np_points.get(self.page_index, [])
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        if np_idx >= len(points):
+            return
+        _, _, orig_top = points[np_idx]
+        # Offset berechnen: neuer Abstand von top zu bot
+        for j in range(0, len(cuts) - 1, 2):
+            if abs(cuts[j] - orig_top) < 1.0:
+                old_bot = cuts[j + 1]
+                delta = new_bot - old_bot
+                cuts[j + 1] = new_bot
+                break
+        else:
+            return
+        # Alle folgenden auto-Untergrenzen um delta verschieben
+        for k in range(np_idx + 1, len(points)):
+            if (self.page_index, k) in self._np_manual_bot:
+                break
+            _, _, top_k = points[k]
+            for j in range(0, len(cuts) - 1, 2):
+                if abs(cuts[j] - top_k) < 1.0:
+                    cuts[j + 1] = cuts[j + 1] + delta
+                    break
+            # Diese Untergrenze als gesetzt markieren (von Propagation)
+            self._np_manual_bot.add((self.page_index, k))
+        # Auch diesen NP als gesetzt markieren
+        self._np_manual_bot.add((self.page_index, np_idx))
 
     def _delete_np_and_strip(self, np_idx):
         """Löscht einen Nullpunkt und das zugehörige Streifen-Paar."""
@@ -915,12 +952,14 @@ class StripApp:
             self._drag_line_index = idx
             self._drag_start_y = y_canvas
             self.canvas.config(cursor="fleur")
-            # Erkennen ob NP-Oberkante gezogen wird
+            # Erkennen ob NP-Ober- oder Untergrenze gezogen wird
             self._drag_np_top_idx = None
-            if idx % 2 == 0:
-                cuts_now = self.cuts_per_page.get(self.page_index, [])
-                if idx < len(cuts_now):
-                    self._drag_np_top_idx = self._find_np_by_top(cuts_now[idx])
+            self._drag_np_bot_idx = None
+            cuts_now = self.cuts_per_page.get(self.page_index, [])
+            if idx % 2 == 0 and idx < len(cuts_now):
+                self._drag_np_top_idx = self._find_np_by_top(cuts_now[idx])
+            elif idx % 2 == 1 and idx - 1 < len(cuts_now):
+                self._drag_np_bot_idx = self._find_np_by_top(cuts_now[idx - 1])
         else:
             self._drag_line_index = None
 
@@ -1126,6 +1165,9 @@ class StripApp:
         # NP-Oberkante: Offset zu allen folgenden auto-NPs propagieren
         if self._drag_np_top_idx is not None:
             self._propagate_np_top(self._drag_np_top_idx, y_pdf)
+        # NP-Untergrenze: delta zu allen folgenden auto-Untergrenzen propagieren
+        if self._drag_np_bot_idx is not None:
+            self._propagate_np_bot(self._drag_np_bot_idx, y_pdf)
         self._draw_lines()
 
     def on_mouse_up(self, event):
@@ -1134,6 +1176,8 @@ class StripApp:
         if self._drag_np_top_idx is not None:
             self._np_manual.add((self.page_index, self._drag_np_top_idx))
             self._drag_np_top_idx = None
+        if self._drag_np_bot_idx is not None:
+            self._drag_np_bot_idx = None
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
         self._update_cursor(x_canvas, y_canvas)
@@ -1324,6 +1368,7 @@ class StripApp:
         self.takt_per_page[self.page_index] = []
         self._np_points[self.page_index] = []
         self._np_manual = {(p, k) for p, k in self._np_manual if p != self.page_index}
+        self._np_manual_bot = {(p, k) for p, k in self._np_manual_bot if p != self.page_index}
         self.takt_manual = {(p, l) for p, l in self.takt_manual
                             if p != self.page_index}
         self.pagebreak_set = {(p, l) for p, l in self.pagebreak_set
