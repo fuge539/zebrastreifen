@@ -457,9 +457,16 @@ class StripApp:
             self._np_points[self.page_index] = []
         page_height = self.doc[self.page_index].rect.height
         y_top = max(0.0, y_pdf - NP_MARGIN_TOP)
-        y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
-        # Untergrenze des Vorgänger-Streifens auf Oberkante dieses Streifens setzen
-        self._update_prev_np_bottom(y_top)
+        points = self._np_points[self.page_index]
+        if points:
+            # Streifenhöhe vom Abstand zum Vorgänger-System ableiten
+            _, _, prev_top = points[-1]
+            strip_h = y_top - prev_top
+            y_bot = min(page_height, y_top + max(strip_h, NP_MARGIN_BOT))
+            # Untergrenze des Vorgänger-Streifens auf Oberkante dieses Streifens setzen
+            self._update_prev_np_bottom(y_top)
+        else:
+            y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
         self._np_points[self.page_index].append((x_pdf, y_pdf, y_top))
         if self.page_index not in self.cuts_per_page:
             self.cuts_per_page[self.page_index] = []
@@ -854,12 +861,12 @@ class StripApp:
         _, _, orig_top = points[np_idx]
         page_height = self.doc[self.page_index].rect.height
         new_top = max(0.0, y_pdf - NP_MARGIN_TOP)
-        new_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
         cuts = self.cuts_per_page.get(self.page_index, [])
         for j in range(len(cuts) - 1):
             if abs(cuts[j] - orig_top) < 1.0:
+                old_height = cuts[j + 1] - cuts[j]   # bestehende Streifenhöhe beibehalten
                 cuts[j]     = new_top
-                cuts[j + 1] = new_bot
+                cuts[j + 1] = min(page_height, new_top + old_height)
                 break
         points[np_idx] = (x_pdf, y_pdf, new_top)
         # Untergrenze des Vorgänger-Streifens mitziehen
