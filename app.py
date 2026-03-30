@@ -706,7 +706,9 @@ class StripApp:
 
     def _auto_detect_rotation(self):
         """Blind-Scan: versucht mehrere Y-Positionen, nimmt Median der Ergebnisse.
-        Wird beim ersten Rendern einer Seite aufgerufen (kein Y-Hinweis nötig)."""
+        Wird beim ersten Rendern einer Seite aufgerufen (kein Y-Hinweis nötig).
+        Vorzeichen-Korrektur: PIL Y-Achse zeigt nach unten → Winkel negieren.
+        Ausreisser-Filter: Werte die > 1° vom Vorläufig-Median abweichen, werden verworfen."""
         if self._page_img is None:
             return None
         h = self._page_img.height
@@ -717,10 +719,20 @@ class StripApp:
             print(f"  [AutoRot] y={int(h*f)}px ({f:.0%}): angle={a}")
             if a is not None:
                 angles.append(a)
-        if not angles:
+        if len(angles) < 3:
             return None
+        # Vorläufiger Median
         angles.sort()
-        return angles[len(angles) // 2]   # Median
+        prelim = angles[len(angles) // 2]
+        # Ausreisser entfernen (Abweichung > 1° vom vorläufigen Median)
+        filtered = [a for a in angles if abs(a - prelim) <= 1.0]
+        print(f"  [AutoRot] gefiltert: {filtered} (von {angles})")
+        if len(filtered) < 3:
+            return None
+        filtered.sort()
+        median = filtered[len(filtered) // 2]
+        # PIL Y nach unten → Vorzeichen invertieren für fitz prerotate
+        return -median
 
     def _detect_page_rotation(self, y_canvas):
         """Ermittelt Seitenrotation aus der Steigung der obersten Systemlinie.
