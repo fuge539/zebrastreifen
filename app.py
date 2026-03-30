@@ -73,6 +73,7 @@ class StripApp:
 
         # Pro Seite: Rotation in Grad (wird von übernächster Seite geerbt)
         self.rotation_per_page: dict[int, float] = {}
+        self._rotation_manual: set[int] = set()   # Seiten mit manuell gesetzter Rotation
 
         # Pro Seite: linker Rand in PDF-Punkten (None = kein benutzerdefinierter Rand)
         self.left_margin_per_page: dict[int, float] = {}
@@ -340,6 +341,7 @@ class StripApp:
         self.page_index = 0
         self.cuts_per_page = {}
         self.rotation_per_page = {}
+        self._rotation_manual = set()
         self.left_margin_per_page = {}
         self.takt_per_page = {}
         self.takt_manual = set()
@@ -548,8 +550,18 @@ class StripApp:
             cuts[insert_pos * 2 + 1] = nxt_top - NP_BOTTOM_GAP
 
         n = len(points)
+
+        # Auto-Rotation: nur wenn Seite noch nicht manuell angepasst
+        rot_info = ""
+        if self.page_index not in self._rotation_manual:
+            angle = self._detect_page_rotation(y_canvas)
+            if angle is not None:
+                self.rotation_per_page[self.page_index] = angle
+                self._update_rotation_ui()
+                rot_info = f"  |  Rotation {angle:+.1f}° erkannt"
+
         self.status.config(
-            text=f"Nullpunkt {insert_pos + 1}/{n} gesetzt (y={y_pdf:.0f} pt)")
+            text=f"Nullpunkt {insert_pos + 1}/{n} gesetzt (y={y_pdf:.0f} pt){rot_info}")
         self._draw_lines()
 
     def _draw_np_markers(self, page_height):
@@ -684,6 +696,43 @@ class StripApp:
         cursor_rel = int(x_canvas) - x0
         best = min(candidates, key=lambda c: abs(c - cursor_rel))
         return float(x0 + best)
+
+    def _detect_page_rotation(self, y_canvas):
+        """Ermittelt Seitenrotation aus der Steigung der obersten Systemlinie.
+        Tastet die Notenlinie an 6 gleichmässig verteilten X-Positionen (15%–85%
+        der Seitenbreite) ab und berechnet per linearer Regression den Winkel.
+        Gibt None zurück wenn zu wenige Punkte oder Winkel unrealistisch (>5°)."""
+        import math
+        if self._page_img is None:
+            return None
+        img = self._page_img
+        n_samples = 6
+        # Scan-Positionen in Bild-Pixel: 15% bis 85% der Seitenbreite
+        scan_positions = [int(img.width * (0.15 + 0.70 * i / (n_samples - 1)))
+                          for i in range(n_samples)]
+        points = []
+        for sx in scan_positions:
+            # _snap_to_staff erwartet x_canvas so dass x_canvas+120 = Scan-Startpunkt
+            y = self._snap_to_staff(sx - 120, y_canvas, search_px=40)
+            if y is not None:
+                points.append((sx, y))
+        if len(points) < 3:
+            return None
+        # Lineare Regression: y = m*x + b
+        n = len(points)
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        x_mean = sum(xs) / n
+        y_mean = sum(ys) / n
+        num = sum((xs[i] - x_mean) * (ys[i] - y_mean) for i in range(n))
+        den = sum((xs[i] - x_mean) ** 2 for i in range(n))
+        if abs(den) < 1:
+            return None
+        slope = num / den
+        angle = math.degrees(math.atan(slope))
+        if abs(angle) > 5.0:   # unrealistische Werte ignorieren
+            return None
+        return round(angle * 2) / 2   # auf 0.5° runden
 
     def _draw_snap_indicator(self, y_canvas, x_cursor=None):
         """Zeichnet Y-Snap-Indikator. Wenn x_cursor gesetzt: Platzierungs-Modus."""
@@ -1549,11 +1598,13 @@ class StripApp:
     def _on_rotation_changed(self, _=None):
         val = round(self._rotation_var.get(), 1)
         self.rotation_per_page[self.page_index] = val
+        self._rotation_manual.add(self.page_index)   # manuell gesetzt → nicht überschreiben
         self.rotation_label.config(text=f"{val:+.1f}°" if val != 0 else "0.0°")
         self.render_page()
 
     def reset_rotation(self):
         self.rotation_per_page[self.page_index] = 0.0
+        self._rotation_manual.discard(self.page_index)
         self._rotation_var.set(0.0)
         self.rotation_label.config(text="0.0°")
         self.render_page()
@@ -1562,6 +1613,7 @@ class StripApp:
         cur = self.rotation_per_page.get(self.page_index, 0.0)
         new_val = round(max(-10.0, min(10.0, cur + delta)), 1)
         self.rotation_per_page[self.page_index] = new_val
+        self._rotation_manual.add(self.page_index)
         self._rotation_var.set(new_val)
         self._on_rotation_changed()
 
