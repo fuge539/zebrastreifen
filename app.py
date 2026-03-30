@@ -74,6 +74,7 @@ class StripApp:
         # Pro Seite: Rotation in Grad (wird von übernächster Seite geerbt)
         self.rotation_per_page: dict[int, float] = {}
         self._rotation_manual: set[int] = set()   # Seiten mit manuell gesetzter Rotation
+        self._rotation_scanned: set[int] = set()  # Seiten die bereits auto-gescannt wurden
 
         # Pro Seite: linker Rand in PDF-Punkten (None = kein benutzerdefinierter Rand)
         self.left_margin_per_page: dict[int, float] = {}
@@ -342,6 +343,7 @@ class StripApp:
         self.cuts_per_page = {}
         self.rotation_per_page = {}
         self._rotation_manual = set()
+        self._rotation_scanned = set()
         self.left_margin_per_page = {}
         self.takt_per_page = {}
         self.takt_manual = set()
@@ -366,13 +368,15 @@ class StripApp:
         self._page_img = img          # PIL-Kopie für Staff-Snap behalten
 
         # Auto-Rotation: nur beim ersten Besuch der Seite (nicht manuell gesetzt)
-        if (self.page_index not in self.rotation_per_page
+        # _rotation_scanned verhindert Endlosrekursion und doppelten Scan
+        if (self.page_index not in self._rotation_scanned
                 and self.page_index not in self._rotation_manual):
+            self._rotation_scanned.add(self.page_index)
             angle = self._auto_detect_rotation()
             if angle is not None and angle != 0.0:
                 self.rotation_per_page[self.page_index] = angle
                 self._update_rotation_ui()
-                # Nochmals rendern mit korrektem Winkel (nur einmal, da jetzt in rotation_per_page)
+                # Nochmals rendern mit korrektem Winkel
                 self.render_page()
                 return
 
