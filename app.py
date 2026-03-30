@@ -76,6 +76,8 @@ class StripApp:
         self._rotation_manual: set[int] = set()   # Seiten mit manuell gesetzter Rotation
         self._rotation_scanned: set[int] = set()  # Seiten die bereits auto-gescannt wurden
 
+        self._updating_ui = False   # Guard gegen rekursive _on_rotation_changed-Aufrufe
+
         # Pro Seite: linker Rand in PDF-Punkten (None = kein benutzerdefinierter Rand)
         self.left_margin_per_page: dict[int, float] = {}
 
@@ -724,12 +726,15 @@ class StripApp:
         # Vorläufiger Median
         angles.sort()
         prelim = angles[len(angles) // 2]
-        # Ausreisser entfernen (Abweichung > 1° vom vorläufigen Median)
-        filtered = [a for a in angles if abs(a - prelim) <= 1.0]
+        # Ausreisser entfernen (Abweichung > 0.75° vom vorläufigen Median)
+        filtered = [a for a in angles if abs(a - prelim) <= 0.75]
         print(f"  [AutoRot] gefiltert: {filtered} (von {angles})")
         if len(filtered) < 3:
             return None
-        filtered.sort()
+        # Nur auswerten wenn Wertebereich ≤ 1° (konsistente Messung)
+        if filtered[-1] - filtered[0] > 1.0:
+            print(f"  [AutoRot] zu inkonsistent (range={filtered[-1]-filtered[0]:.1f}°) → None")
+            return None
         median = filtered[len(filtered) // 2]
         # PIL Y nach unten → Vorzeichen invertieren für fitz prerotate
         return -median
@@ -1633,6 +1638,8 @@ class StripApp:
     # --------------------------------------------------------- Rotation ------
 
     def _on_rotation_changed(self, _=None):
+        if self._updating_ui:
+            return
         val = round(self._rotation_var.get(), 1)
         self.rotation_per_page[self.page_index] = val
         self._rotation_manual.add(self.page_index)   # manuell gesetzt → nicht überschreiben
@@ -1655,9 +1662,11 @@ class StripApp:
         self._on_rotation_changed()
 
     def _update_rotation_ui(self):
+        self._updating_ui = True
         val = self.rotation_per_page.get(self.page_index, 0.0)
         self._rotation_var.set(val)
         self.rotation_label.config(text=f"{val:+.1f}°" if val != 0 else "0.0°")
+        self._updating_ui = False
 
     def on_mousewheel(self, event):
         # Ctrl + Mausrad = Zoom
