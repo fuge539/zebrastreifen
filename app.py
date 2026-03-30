@@ -1100,16 +1100,15 @@ class StripApp:
         y_canvas = self.canvas.canvasy(event.y)
         x_canvas = self.canvas.canvasx(event.x)
 
-        # NP-Rauten haben Priorität: immer zuerst prüfen (vor _find_nearby_line)
-        if self._is_np_zone(x_canvas):
-            points = self._np_points.get(self.page_index, [])
-            for i, (xp, yp, _) in enumerate(points):
-                if abs(xp * self.scale - x_canvas) <= 12 and abs(yp * self.scale - y_canvas) <= 12:
-                    self._drag_np_index = i
-                    self._drag_line_index = None
-                    self._drag_np_top_idx = None
-                    self.canvas.config(cursor="fleur")
-                    return
+        # NP-Rauten haben Priorität: immer zuerst prüfen (auch außerhalb NP-Zone!)
+        points = self._np_points.get(self.page_index, [])
+        for i, (xp, yp, _) in enumerate(points):
+            if abs(xp * self.scale - x_canvas) <= 12 and abs(yp * self.scale - y_canvas) <= 12:
+                self._drag_np_index = i
+                self._drag_line_index = None
+                self._drag_np_top_idx = None
+                self.canvas.config(cursor="fleur")
+                return
 
         idx = self._find_nearby_line(y_canvas)
         if idx is not None:
@@ -1343,6 +1342,8 @@ class StripApp:
             self._draw_snap_indicator(self._np_placing_y, x_cursor=x_canvas)
             return
         if self._drag_np_index is not None and self.doc is not None:
+            # Snap während Drag neu berechnen (on_mouse_move feuert bei B1-Motion nicht)
+            self._snap_y = self._snap_to_staff(x_canvas, y_canvas)
             self._drag_np(self._drag_np_index, x_canvas, y_canvas)
             return
         if self._drag_line_index is None or self.doc is None:
