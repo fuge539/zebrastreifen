@@ -377,8 +377,10 @@ class StripApp:
             if angle is not None and angle != 0.0:
                 self.rotation_per_page[self.page_index] = angle
                 self._update_rotation_ui()
+                print(f"[AutoRot] Render mit rotation={self.rotation_per_page.get(self.page_index)}")
                 self.render_page()
                 return
+        print(f"[AutoRot] normaler Render, rotation={rotation}")
 
         self._photo = ImageTk.PhotoImage(img)
         self.canvas.delete("all")
