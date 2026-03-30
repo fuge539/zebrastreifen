@@ -373,10 +373,10 @@ class StripApp:
                 and self.page_index not in self._rotation_manual):
             self._rotation_scanned.add(self.page_index)
             angle = self._auto_detect_rotation()
+            print(f"[AutoRot] Seite {self.page_index+1}: erkannt={angle}")
             if angle is not None and angle != 0.0:
                 self.rotation_per_page[self.page_index] = angle
                 self._update_rotation_ui()
-                # Nochmals rendern mit korrektem Winkel
                 self.render_page()
                 return
 
@@ -712,6 +712,7 @@ class StripApp:
         angles = []
         for f in fractions:
             a = self._detect_page_rotation(int(h * f))
+            print(f"  [AutoRot] y={int(h*f)}px ({f:.0%}): angle={a}")
             if a is not None:
                 angles.append(a)
         if not angles:
