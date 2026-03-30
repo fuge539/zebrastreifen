@@ -571,48 +571,83 @@ class StripApp:
             )
 
     def _snap_to_staff(self, x_canvas, y_canvas, search_px=60):
-        """Sucht die oberste Notenlinie im Suchfenster.
-        Notenlinie = dunkle Zeile mit niedriger Varianz (horizontal durchgehend).
-        Senkrechte Linien/Klammern haben hohe Varianz → werden ignoriert.
-        Startet 30px rechts vom Cursor um Klammern/Taktstriche zu überspringen."""
+        """Sucht die OBERSTE Notenlinie des Notensystems beim Cursor.
+        Strategie:
+        1. Horizontale Linien im Suchfenster erkennen (niedrige Varianz).
+        2. Kandidaten zu Gruppen zusammenfassen (±2px → eine Linie).
+        3. Nächste Gruppe zum Cursor bestimmen.
+        4. Linien-Abstand (Spacing) aus benachbarten Gruppen berechnen.
+        5. Von der nächsten Linie so weit nach oben gehen, wie weitere
+           äquidistante Linien gefunden werden → oberste Linie zurückgeben.
+        Senkrechte Linien/Klammern haben hohe Varianz → werden ignoriert."""
         if self._page_img is None:
             return None
         img = self._page_img
-        # Rechts und unten vom Cursor suchen (Maus nähert sich von oben-links)
+        # Grosse Suchregion: 50px über und 60px unter dem Cursor,
+        # 20px rechts versetzt um Klammern/Taktstriche zu überspringen.
         x0 = max(0, int(x_canvas) + 20)
         x1 = min(img.width, x0 + 100)
-        y0 = max(0, int(y_canvas) - 8)   # wenig oberhalb
-        y1 = min(img.height, int(y_canvas) + search_px)  # hauptsächlich unterhalb
+        y0 = max(0, int(y_canvas) - 50)
+        y1 = min(img.height, int(y_canvas) + search_px)
         if x1 <= x0 or y1 <= y0:
             return None
         region = img.crop((x0, y0, x1, y1)).convert('L')
         w, h = region.size
         if w < 10 or h == 0:
             return None
-        data = region.tobytes()   # bytes, direkt slicebar, kein getdata()
+        data = region.tobytes()
         rows = [data[r * w:(r + 1) * w] for r in range(h)]
         row_avgs = [sum(r) / w for r in rows]
         avg_all = sum(row_avgs) / len(row_avgs)
         threshold = min(200, avg_all * 0.80)
 
-        candidates = []
+        raw = []
         for i, (avg, row) in enumerate(zip(row_avgs, rows)):
             if avg >= threshold:
                 continue
-            # Varianz der Zeile: Notenlinie hat niedrige Varianz (gleichmässig dunkel)
             variance = sum((v - avg) ** 2 for v in row) / w
-            if variance < 1200:   # niedrige Varianz = horizontale Linie
-                candidates.append(i)
+            if variance < 1200:
+                raw.append(i)
 
-        if not candidates:
+        if not raw:
             return None
-        # Nächste dunkle Zeile zum Cursor (nicht die oberste der ganzen Region)
+
+        # Kandidaten clustern: aufeinanderfolgende Pixel-Zeilen → eine Linie
+        clusters = []
+        for r in raw:
+            if clusters and r - clusters[-1] <= 2:
+                clusters[-1] = (clusters[-1] + r) // 2
+            else:
+                clusters.append(r)
+
+        # Nächste Gruppe zum Cursor
         cursor_rel = int(y_canvas) - y0
-        best = min(candidates, key=lambda r: abs(r - cursor_rel))
-        # Nur snappen wenn nah genug (max 25px)
-        if abs(best - cursor_rel) > 25:
+        nearest = min(clusters, key=lambda r: abs(r - cursor_rel))
+        if abs(nearest - cursor_rel) > 25:
             return None
-        return float(y0 + best)
+
+        # Spacing aus benachbarten Gruppen bestimmen
+        spacing = None
+        if len(clusters) >= 2:
+            spacings = [clusters[k + 1] - clusters[k]
+                        for k in range(len(clusters) - 1)
+                        if 3 <= clusters[k + 1] - clusters[k] <= 25]
+            if spacings:
+                spacing = sum(spacings) / len(spacings)
+
+        if spacing is None:
+            return float(y0 + nearest)
+
+        # Von der nächsten Linie nach OBEN zur obersten Systemlinie steigen
+        top = nearest
+        for _ in range(4):   # max 4 Schritte (5-liniges System)
+            expected = top - spacing
+            match = min(clusters, key=lambda r: abs(r - expected))
+            if abs(match - expected) < spacing * 0.35 and match < top:
+                top = match
+            else:
+                break
+        return float(y0 + top)
 
     def _snap_to_vertical(self, x_canvas, y_canvas, search_px=60):
         """Sucht die nächste senkrechte Linie links/rechts vom Cursor.
