@@ -364,8 +364,19 @@ class StripApp:
         pix = page.get_pixmap(matrix=mat)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         self._page_img = img          # PIL-Kopie für Staff-Snap behalten
-        self._photo = ImageTk.PhotoImage(img)
 
+        # Auto-Rotation: nur beim ersten Besuch der Seite (nicht manuell gesetzt)
+        if (self.page_index not in self.rotation_per_page
+                and self.page_index not in self._rotation_manual):
+            angle = self._auto_detect_rotation()
+            if angle is not None and angle != 0.0:
+                self.rotation_per_page[self.page_index] = angle
+                self._update_rotation_ui()
+                # Nochmals rendern mit korrektem Winkel (nur einmal, da jetzt in rotation_per_page)
+                self.render_page()
+                return
+
+        self._photo = ImageTk.PhotoImage(img)
         self.canvas.delete("all")
         self.canvas.config(scrollregion=(0, 0, pix.width, pix.height))
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self._photo)
@@ -550,18 +561,8 @@ class StripApp:
             cuts[insert_pos * 2 + 1] = nxt_top - NP_BOTTOM_GAP
 
         n = len(points)
-
-        # Auto-Rotation: nur wenn Seite noch nicht manuell angepasst
-        rot_info = ""
-        if self.page_index not in self._rotation_manual:
-            angle = self._detect_page_rotation(y_canvas)
-            if angle is not None:
-                self.rotation_per_page[self.page_index] = angle
-                self._update_rotation_ui()
-                rot_info = f"  |  Rotation {angle:+.1f}° erkannt"
-
         self.status.config(
-            text=f"Nullpunkt {insert_pos + 1}/{n} gesetzt (y={y_pdf:.0f} pt){rot_info}")
+            text=f"Nullpunkt {insert_pos + 1}/{n} gesetzt (y={y_pdf:.0f} pt)")
         self._draw_lines()
 
     def _draw_np_markers(self, page_height):
@@ -696,6 +697,23 @@ class StripApp:
         cursor_rel = int(x_canvas) - x0
         best = min(candidates, key=lambda c: abs(c - cursor_rel))
         return float(x0 + best)
+
+    def _auto_detect_rotation(self):
+        """Blind-Scan: versucht mehrere Y-Positionen, nimmt Median der Ergebnisse.
+        Wird beim ersten Rendern einer Seite aufgerufen (kein Y-Hinweis nötig)."""
+        if self._page_img is None:
+            return None
+        h = self._page_img.height
+        fractions = (0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80)
+        angles = []
+        for f in fractions:
+            a = self._detect_page_rotation(int(h * f))
+            if a is not None:
+                angles.append(a)
+        if not angles:
+            return None
+        angles.sort()
+        return angles[len(angles) // 2]   # Median
 
     def _detect_page_rotation(self, y_canvas):
         """Ermittelt Seitenrotation aus der Steigung der obersten Systemlinie.
