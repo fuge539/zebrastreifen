@@ -1,14 +1,19 @@
 """
-Noten-Streifen-Extraktor
+zebrastreifen — Noten-Streifen-Extraktor
 Bedienung:
-  - PDF öffnen via "Datei öffnen"
-  - Klicken setzt abwechselnd Ober- und Untergrenze eines Streifens
-  - Erster Klick = obere Abschneidemarke (was darüber ist, wird verworfen)
-  - Zweiter Klick = unteres Ende des ersten Streifens
-  - Dritter Klick = oberes Ende des zweiten Streifens
-  - Vierter Klick = unteres Ende des zweiten Streifens
-  - usw.
+  Normalmodus (rechte Seitenhälfte):
+  - Linksklick setzt abwechselnd Ober- und Untergrenze eines Streifens
   - Linien sind per Drag & Drop verschiebbar
+  - Rechtsklick löscht eine Linie / setzt linken Rand
+
+  Nullpunkt-Modus (linke 40 % der Seite = NP-Zone):
+  - Hover → Y snapt auf nächste Notenlinie (blauer Strich)
+  - Klick → Y sperren, Diamant erscheint
+  - Klick + Drag nach links/rechts → X-Position setzen
+  - Loslassen → Nullpunkt + Streifen werden automatisch erzeugt
+  - Drag auf Diamant → Nullpunkt nachträglich verschieben
+  - Rechtsklick auf Diamant → Nullpunkt entfernen
+
   - "Weiter" geht zur nächsten Seite (Schnitte werden übertragen)
   - "PDF exportieren" erzeugt das Ausgabe-PDF
 """
@@ -143,8 +148,11 @@ class StripApp:
             ("Delete / ←",      "Letzte Linie entfernen"),
             ("",                ""),
             ("Nullpunkte (NP)",  ""),
-            ("← Klick (NP-Zone)","Nullpunkt + Streifen setzen"),
-            ("Drag ◆",          "Nullpunkt verschieben"),
+            ("Hover (NP-Zone)",  "Y snapt auf Notenlinie (blauer Strich)"),
+            ("Klick (NP-Zone)",  "Y sperren → Diamant erscheint"),
+            ("Klick + Drag →",   "X-Position ziehen (snapt auf Senkrechte)"),
+            ("Loslassen",        "Nullpunkt + Streifen bestätigen"),
+            ("Drag ◆",          "Bestehenden Nullpunkt verschieben"),
             ("Rechtsklick ◆",   "Nullpunkt entfernen"),
             ("⟳ NP füllen",    "Seite füllen (≥2 NP nötig)"),
             ("⟳ Alle Seiten",  "Alle leeren Seiten füllen"),
@@ -1614,10 +1622,16 @@ class StripApp:
             messagebox.showwarning("Keine Streifen", "Bitte erst Streifen definieren.")
             return
 
+        # Vorschlag: gleicher Ordner wie Quell-PDF, Dateiname mit "_streifen"-Suffix
+        src_dir  = os.path.dirname(self.doc_path) if self.doc_path else os.path.expanduser("~")
+        src_base = os.path.splitext(os.path.basename(self.doc_path))[0] if self.doc_path else "export"
+        init_file = src_base + "_streifen.pdf"
         out_path = filedialog.asksaveasfilename(
             defaultextension=".pdf",
             filetypes=[("PDF-Dateien", "*.pdf")],
-            title="Ausgabe-PDF speichern"
+            title="Ausgabe-PDF speichern",
+            initialdir=src_dir,
+            initialfile=init_file,
         )
         if not out_path:
             return
@@ -1626,67 +1640,75 @@ class StripApp:
             EXPORT_PRESETS[self._export_preset.get()]
 
         out_doc = fitz.open()
-        cur_page = out_doc.new_page(width=pg_w, height=pg_h)
-        cursor_y = mg_top
-        # Cache: volle gedrehte Seite bei EXPORT_SCALE (einmal pro Seite rendern)
-        _render_cache: dict[int, Image.Image] = {}
+        try:
+            cur_page = out_doc.new_page(width=pg_w, height=pg_h)
+            cursor_y = mg_top
+            # Cache: volle gedrehte Seite bei EXPORT_SCALE (einmal pro Seite rendern)
+            _render_cache: dict[int, Image.Image] = {}
 
-        for i, (page_idx, y_top, y_bot, rotation, takt, forced_break) in enumerate(strips):
-            src_page = self.doc[page_idx]
-            left_x = self.left_margin_per_page.get(page_idx, src_page.rect.x0)
-            clip = fitz.Rect(left_x, y_top, src_page.rect.x1, y_bot)
-            strip_w = src_page.rect.x1 - left_x
-            has_custom_margin = page_idx in self.left_margin_per_page
-            takt_label = f"[{takt}]" if self._show_takt.get() else None
+            for i, (page_idx, y_top, y_bot, rotation, takt, forced_break) in enumerate(strips):
+                src_page = self.doc[page_idx]
+                left_x = self.left_margin_per_page.get(page_idx, src_page.rect.x0)
+                clip = fitz.Rect(left_x, y_top, src_page.rect.x1, y_bot)
+                strip_w = src_page.rect.x1 - left_x
+                has_custom_margin = page_idx in self.left_margin_per_page
+                takt_label = f"[{takt}]" if self._show_takt.get() else None
 
-            if rotation == 0:
-                # Vektorgrafik – keine Qualitätseinbusse
-                strip_h = abs(y_bot - y_top)
-                if i > 0 and (forced_break or cursor_y + strip_h > pg_h - mg_bot):
-                    cur_page = out_doc.new_page(width=pg_w, height=pg_h)
-                    cursor_y = mg_top
-                x_off = mg_left if has_custom_margin else (pg_w - strip_w) / 2
-                dest = fitz.Rect(x_off, cursor_y, x_off + strip_w, cursor_y + strip_h)
-                cur_page.show_pdf_page(dest, self.doc, page_idx, clip=clip)
-                if takt_label:
-                    cur_page.insert_textbox(
-                        fitz.Rect(x_off + 2, cursor_y + 2, x_off + 38, cursor_y + 16),
-                        takt_label, fontsize=8, color=(0.15, 0.15, 0.15)
-                    )
-                cursor_y += strip_h + gap
+                if rotation == 0:
+                    # Vektorgrafik – keine Qualitätseinbusse
+                    strip_h = abs(y_bot - y_top)
+                    if i > 0 and (forced_break or cursor_y + strip_h > pg_h - mg_bot):
+                        cur_page = out_doc.new_page(width=pg_w, height=pg_h)
+                        cursor_y = mg_top
+                    x_off = mg_left if has_custom_margin else (pg_w - strip_w) / 2
+                    dest = fitz.Rect(x_off, cursor_y, x_off + strip_w, cursor_y + strip_h)
+                    cur_page.show_pdf_page(dest, self.doc, page_idx, clip=clip)
+                    if takt_label:
+                        cur_page.insert_textbox(
+                            fitz.Rect(x_off + 2, cursor_y + 2, x_off + 38, cursor_y + 16),
+                            takt_label, fontsize=8, color=(0.15, 0.15, 0.15)
+                        )
+                    cursor_y += strip_h + gap
 
-            else:
-                # Beliebige Rotation: 300-DPI-Raster (WYSIWYG, per-page cache)
-                if page_idx not in _render_cache:
-                    mat = fitz.Matrix(EXPORT_SCALE, EXPORT_SCALE).prerotate(rotation)
-                    pix = src_page.get_pixmap(matrix=mat)
-                    _render_cache[page_idx] = Image.frombytes(
-                        "RGB", [pix.width, pix.height], pix.samples)
-                full_img = _render_cache[page_idx]
-                crop_y1 = int(y_top * EXPORT_SCALE)
-                crop_y2 = int(y_bot * EXPORT_SCALE)
-                img = full_img.crop((0, crop_y1, full_img.width, crop_y2))
-                if has_custom_margin:
-                    crop_x = int(left_x * EXPORT_SCALE)
-                    img = img.crop((crop_x, 0, img.width, img.height))
-                if takt_label:
-                    draw = ImageDraw.Draw(img)
-                    px = int(8 * EXPORT_SCALE)
-                    draw.text((8, 8), takt_label, fill=(40, 40, 40), font_size=px)
-                img_w_pt = img.width / EXPORT_SCALE
-                img_h_pt = img.height / EXPORT_SCALE
-                if i > 0 and (forced_break or cursor_y + img_h_pt > pg_h - mg_bot):
-                    cur_page = out_doc.new_page(width=pg_w, height=pg_h)
-                    cursor_y = mg_top
-                x_off = mg_left if has_custom_margin else (pg_w - img_w_pt) / 2
-                dest = fitz.Rect(x_off, cursor_y, x_off + img_w_pt, cursor_y + img_h_pt)
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                cur_page.insert_image(dest, stream=buf.getvalue())
-                cursor_y += img_h_pt + gap
+                else:
+                    # Beliebige Rotation: 300-DPI-Raster (WYSIWYG, per-page cache)
+                    if page_idx not in _render_cache:
+                        mat = fitz.Matrix(EXPORT_SCALE, EXPORT_SCALE).prerotate(rotation)
+                        pix = src_page.get_pixmap(matrix=mat)
+                        _render_cache[page_idx] = Image.frombytes(
+                            "RGB", [pix.width, pix.height], pix.samples)
+                    full_img = _render_cache[page_idx]
+                    crop_y1 = int(y_top * EXPORT_SCALE)
+                    crop_y2 = int(y_bot * EXPORT_SCALE)
+                    img = full_img.crop((0, crop_y1, full_img.width, crop_y2))
+                    if has_custom_margin:
+                        crop_x = int(left_x * EXPORT_SCALE)
+                        img = img.crop((crop_x, 0, img.width, img.height))
+                    if takt_label:
+                        draw = ImageDraw.Draw(img)
+                        px = int(8 * EXPORT_SCALE)
+                        draw.text((8, 8), takt_label, fill=(40, 40, 40), font_size=px)
+                    img_w_pt = img.width / EXPORT_SCALE
+                    img_h_pt = img.height / EXPORT_SCALE
+                    if i > 0 and (forced_break or cursor_y + img_h_pt > pg_h - mg_bot):
+                        cur_page = out_doc.new_page(width=pg_w, height=pg_h)
+                        cursor_y = mg_top
+                    x_off = mg_left if has_custom_margin else (pg_w - img_w_pt) / 2
+                    dest = fitz.Rect(x_off, cursor_y, x_off + img_w_pt, cursor_y + img_h_pt)
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    cur_page.insert_image(dest, stream=buf.getvalue())
+                    cursor_y += img_h_pt + gap
 
-        self._add_footers(out_doc, pg_w, pg_h)
-        out_doc.save(out_path)
+            self._add_footers(out_doc, pg_w, pg_h)
+            out_doc.save(out_path)
+        except Exception as exc:
+            out_doc.close()
+            messagebox.showerror("Export fehlgeschlagen",
+                                 f"Fehler beim Exportieren:\n\n{exc}\n\n"
+                                 f"Bitte Screenshot an Entwickler schicken.")
+            self.status.config(text="Export fehlgeschlagen.")
+            return
         out_doc.close()
         self.status.config(text=f"Exportiert: {out_path}")
         if self._open_after_export.get():
