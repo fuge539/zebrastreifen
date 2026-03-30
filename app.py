@@ -583,10 +583,11 @@ class StripApp:
         if self._page_img is None:
             return None
         img = self._page_img
-        # Grosse Suchregion: 50px über und 60px unter dem Cursor,
-        # 20px rechts versetzt um Klammern/Taktstriche zu überspringen.
-        x0 = max(0, int(x_canvas) + 20)
-        x1 = min(img.width, x0 + 100)
+        # Grosse Suchregion: 50px über und 60px unter dem Cursor.
+        # 120px rechts versetzt: Schlüssel + Vorzeichen überspringen,
+        # dort sind die Notenlinien sauber und horizontal durchgehend.
+        x0 = max(0, int(x_canvas) + 120)
+        x1 = min(img.width, x0 + 120)
         y0 = max(0, int(y_canvas) - 50)
         y1 = min(img.height, int(y_canvas) + search_px)
         if x1 <= x0 or y1 <= y0:
@@ -649,7 +650,7 @@ class StripApp:
                 break
         return float(y0 + top)
 
-    def _snap_to_vertical(self, x_canvas, y_canvas, search_px=60):
+    def _snap_to_vertical(self, x_canvas, y_canvas, search_px=18):
         """Sucht die nächste senkrechte Linie links/rechts vom Cursor.
         Senkrechte Linie = dunkle Spalte mit niedriger Zeilen-Varianz."""
         if self._page_img is None:
