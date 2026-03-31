@@ -718,7 +718,8 @@ class StripApp:
         if self._page_img is None:
             return None
         h = self._page_img.height
-        fractions = (0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80)
+        # 9 Samples von 20–60% in 5%-Schritten: Notenbereich, kein Fuss/Leerraum
+        fractions = (0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60)
         angles = []
         for f in fractions:
             a = self._detect_page_rotation(int(h * f))
