@@ -729,18 +729,21 @@ class StripApp:
         # Vorläufiger Median
         angles.sort()
         prelim = angles[len(angles) // 2]
-        # Ausreisser entfernen (Abweichung > 0.75° vom vorläufigen Median)
-        filtered = [a for a in angles if abs(a - prelim) <= 0.75]
+        # Ausreisser entfernen (Abweichung > 0.5° vom vorläufigen Median)
+        filtered = [a for a in angles if abs(a - prelim) <= 0.5]
         print(f"  [AutoRot] gefiltert: {filtered} (von {angles})")
-        if len(filtered) < 3:
+        # Mindestens 4 konsistente Werte (Mehrheit von 7 Samples)
+        if len(filtered) < 4:
+            print(f"  [AutoRot] zu wenig Konsens ({len(filtered)}/7) → None")
             return None
-        # Nur auswerten wenn Wertebereich ≤ 1° (konsistente Messung)
-        if filtered[-1] - filtered[0] > 1.0:
+        # Wertebereich ≤ 0.5° (sehr konsistente Messung)
+        if filtered[-1] - filtered[0] > 0.5:
             print(f"  [AutoRot] zu inkonsistent (range={filtered[-1]-filtered[0]:.1f}°) → None")
             return None
         median = filtered[len(filtered) // 2]
         # PIL Y nach unten → Vorzeichen invertieren für fitz prerotate
-        return -median
+        result = -median
+        return 0.0 if abs(result) < 0.25 else result
 
     def _detect_page_rotation(self, y_canvas):
         """Ermittelt Seitenrotation aus der Steigung der obersten Systemlinie.
