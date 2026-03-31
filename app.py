@@ -371,18 +371,21 @@ class StripApp:
 
         # Auto-Rotation: nur beim ersten Besuch der Seite (nicht manuell gesetzt)
         # _rotation_scanned verhindert Endlosrekursion und doppelten Scan
+        # Auto-Detect nur wenn: noch nicht gescannt, nicht manuell, und keine
+        # geerbte Rotation (sonst detektieren wir das bereits korrigierte Bild)
+        inherited = self.rotation_per_page.get(self.page_index, 0.0)
         if (self.page_index not in self._rotation_scanned
-                and self.page_index not in self._rotation_manual):
+                and self.page_index not in self._rotation_manual
+                and inherited == 0.0):
             self._rotation_scanned.add(self.page_index)
             angle = self._auto_detect_rotation()
             print(f"[AutoRot] Seite {self.page_index+1}: erkannt={angle}")
             if angle is not None and angle != 0.0:
                 self.rotation_per_page[self.page_index] = angle
                 self._update_rotation_ui()
-                print(f"[AutoRot] Render mit rotation={self.rotation_per_page.get(self.page_index)}")
                 self.render_page()
                 return
-        print(f"[AutoRot] normaler Render, rotation={rotation}")
+        self._rotation_scanned.add(self.page_index)
 
         self._photo = ImageTk.PhotoImage(img)
         self.canvas.delete("all")
@@ -1662,11 +1665,12 @@ class StripApp:
         self._on_rotation_changed()
 
     def _update_rotation_ui(self):
-        self._updating_ui = True
+        # command kurz abkoppeln damit set() kein _on_rotation_changed triggert
+        self.rotation_slider.configure(command='')
         val = self.rotation_per_page.get(self.page_index, 0.0)
         self._rotation_var.set(val)
         self.rotation_label.config(text=f"{val:+.1f}°" if val != 0 else "0.0°")
-        self._updating_ui = False
+        self.rotation_slider.configure(command=self._on_rotation_changed)
 
     def on_mousewheel(self, event):
         # Ctrl + Mausrad = Zoom
