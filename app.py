@@ -853,33 +853,40 @@ class StripApp:
             points[k] = (xk, yk, new_top_k)
 
     def _propagate_np_bot(self, np_idx, new_bot):
-        """Propagiert geänderte Untergrenze zu allen folgenden nicht-manuellen NP-Untergrenzen."""
+        """Propagiert geänderte Untergrenze als Ziel-HÖHE zu allen folgenden auto-Streifen.
+        Nur der direkt gezogene Streifen wird manuell (solid); die propagierten bleiben
+        gestrichelt/auto und folgen zukünftigen Anpassungen weiterhin.
+        Stoppt an der ersten manuell gesetzten Untergrenze."""
         points = self._np_points.get(self.page_index, [])
         cuts = self.cuts_per_page.get(self.page_index, [])
         if np_idx >= len(points):
             return
         _, _, orig_top = points[np_idx]
-        # Offset berechnen: neuer Abstand von top zu bot
+        page_height = self.doc[self.page_index].rect.height
+
+        # Gezogenen Streifen setzen, neue Ziel-Höhe ableiten
+        strip_top = None
         for j in range(0, len(cuts) - 1, 2):
             if abs(cuts[j] - orig_top) < 1.0:
-                old_bot = cuts[j + 1]
-                delta = new_bot - old_bot
+                strip_top = cuts[j]
                 cuts[j + 1] = new_bot
                 break
         else:
             return
-        # Alle folgenden auto-Untergrenzen um delta verschieben
+        new_H = new_bot - strip_top   # Ziel-Höhe für Nachfolger
+
+        # Alle folgenden auto-Streifen auf gleiche Höhe setzen (nur schrumpfen)
         for k in range(np_idx + 1, len(points)):
             if (self.page_index, k) in self._np_manual_bot:
-                break
+                break   # An manuell gesetzter Linie stoppen
             _, _, top_k = points[k]
             for j in range(0, len(cuts) - 1, 2):
                 if abs(cuts[j] - top_k) < 1.0:
-                    cuts[j + 1] = cuts[j + 1] + delta
+                    cuts[j + 1] = min(cuts[j] + new_H, page_height)
                     break
-            # Diese Untergrenze als gesetzt markieren (von Propagation)
-            self._np_manual_bot.add((self.page_index, k))
-        # Auch diesen NP als gesetzt markieren
+            # NICHT zu _np_manual_bot hinzufügen → bleibt gestrichelt/auto
+
+        # Nur den direkt gezogenen Streifen als manuell markieren (solid)
         self._np_manual_bot.add((self.page_index, np_idx))
 
     def _delete_np_and_strip(self, np_idx):
