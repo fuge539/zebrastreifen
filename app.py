@@ -379,10 +379,11 @@ class StripApp:
                 and inherited == 0.0):
             self._rotation_scanned.add(self.page_index)
             angle = self._auto_detect_rotation()
-            print(f"[AutoRot] Seite {self.page_index+1}: erkannt={angle}")
             if angle is not None and angle != 0.0:
                 self.rotation_per_page[self.page_index] = angle
                 self._update_rotation_ui()
+                self.status.config(
+                    text=f"Seite {self.page_index+1}: Rotation {angle:+.1f}° automatisch erkannt")
                 self.render_page()
                 return
         self._rotation_scanned.add(self.page_index)
@@ -721,7 +722,6 @@ class StripApp:
         angles = []
         for f in fractions:
             a = self._detect_page_rotation(int(h * f))
-            print(f"  [AutoRot] y={int(h*f)}px ({f:.0%}): angle={a}")
             if a is not None:
                 angles.append(a)
         if len(angles) < 3:
@@ -731,14 +731,11 @@ class StripApp:
         prelim = angles[len(angles) // 2]
         # Ausreisser entfernen (Abweichung > 0.5° vom vorläufigen Median)
         filtered = [a for a in angles if abs(a - prelim) <= 0.5]
-        print(f"  [AutoRot] gefiltert: {filtered} (von {angles})")
         # Mindestens 4 konsistente Werte (Mehrheit von 7 Samples)
         if len(filtered) < 4:
-            print(f"  [AutoRot] zu wenig Konsens ({len(filtered)}/7) → None")
             return None
         # Wertebereich ≤ 0.5° (sehr konsistente Messung)
         if filtered[-1] - filtered[0] > 0.5:
-            print(f"  [AutoRot] zu inkonsistent (range={filtered[-1]-filtered[0]:.1f}°) → None")
             return None
         median = filtered[len(filtered) // 2]
         # PIL Y nach unten → Vorzeichen invertieren für fitz prerotate
