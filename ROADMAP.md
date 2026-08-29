@@ -2,14 +2,46 @@
 
 Stand: 2026-08-29, Branch `master`
 
+## Übergabe / Status auf einen Blick
+
+Für eine neue Session (Claude oder sonst wer) — kurz einlesen, dann
+weiss man Bescheid, ohne die ganze Datei lesen zu müssen:
+
+- **Was die App tut**: Streifen aus Noten-PDFs extrahieren (Chor/Musik).
+  Seite ist in zwei Bereiche geteilt: rechts **Schnitte** (Streifen
+  manuell setzen), links **Anker** (Klick auf Notenzeile → Streifen
+  automatisch). Per Klick auf die Zonen-Labels oben lässt sich in den
+  **X-Modus** umschalten (linker/rechter Seitenrand für die ganze
+  Seite).
+- **Stand**: Version 0.2 (Alpha), funktionsfähig, heute (2026-08-29)
+  grossteils neu gebaut (Anker-System, Shift-Lock, Doppelkante,
+  X-Modus). Details siehe Abschnitte unten.
+- **Repo ist öffentlich**: https://github.com/fuge539/zebrastreifen
+  (MIT-Lizenz). Release mit fertiger Windows-`.exe`:
+  https://github.com/fuge539/zebrastreifen/releases — bei neuer Version
+  `pyinstaller zebrastreifen.spec` + `gh release create <tag>
+  dist/zebrastreifen.exe`.
+- **Nächste offene Punkte** (siehe TODO unten): Ctrl+Z Undo, ein paar
+  kleinere zurückgestellte Ideen (Shift-Lock generalisieren,
+  Radiergummi, robustere Kalibrierung).
+- Lokaler Projektordner wird evtl. nach `tools/zebrastreifen`
+  verschoben — falls der Pfad nicht mehr `C:/Users/pfr/zebrastreifen`
+  ist, ist das erwartet.
+
 ## TODO
 
 - **Einfaches Undo (Ctrl+Z)** — noch nicht angegangen, bewusst zurückgestellt.
 
 ## Aufräumen (bekannte Leichen / Konflikte)
 
-- **Linker Rand ist vorerst deaktiviert** (`LEFT_MARGIN_ENABLED = False` in
-  app.py): weder per Rechtsklick-Fallback noch per Linksklick in der
+- ~~Linker Rand ist vorerst deaktiviert~~ **Überholt**: linker/rechter
+  Rand sind über den X-Modus voll nutzbar (siehe "Erledigt: Y-Modus /
+  X-Modus" unten). `LEFT_MARGIN_ENABLED = False` und die alten
+  Y-Modus-spezifischen Rand-Mechanismen (Rechtsklick-Fallback, Klick in
+  linker Streifen-Zone) bleiben bewusst deaktiviert/tot — X-Modus hat
+  eine eigene, unabhängige Klick-Logik dafür. Ursprünglicher Text zur
+  Erinnerung, warum das damals deaktiviert wurde:
+  weder per Rechtsklick-Fallback noch per Linksklick in der
   linken Streifen-Zone setzbar, auch keine Snap-Vorschau mehr. Grund:
   gehört konzeptionell zum geplanten X-Modus (siehe unten), nicht zum
   aktuellen Y/Nullzeile-Fokus — bis dahin lieber ganz weg als
