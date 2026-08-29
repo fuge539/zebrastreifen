@@ -1,14 +1,17 @@
 """
-Noten-Streifen-Extraktor
+zebrastreifen — Noten-Streifen-Extraktor
 Bedienung:
-  - PDF öffnen via "Datei öffnen"
-  - Klicken setzt abwechselnd Ober- und Untergrenze eines Streifens
-  - Erster Klick = obere Abschneidemarke (was darüber ist, wird verworfen)
-  - Zweiter Klick = unteres Ende des ersten Streifens
-  - Dritter Klick = oberes Ende des zweiten Streifens
-  - Vierter Klick = unteres Ende des zweiten Streifens
-  - usw.
+  Normalmodus (rechte Seitenhälfte):
+  - Linksklick setzt abwechselnd Ober- und Untergrenze eines Streifens
   - Linien sind per Drag & Drop verschiebbar
+  - Rechtsklick löscht eine Linie
+
+  Anker-Modus (linke 50 % der Seite = Anker-Zone):
+  - Hover → Y snapt auf nächste Notenlinie (blauer Strich)
+  - Klick → Anker + Streifen werden sofort automatisch erzeugt
+  - Drag auf Anker → Anker nachträglich vertikal verschieben
+  - Rechtsklick auf Anker → Anker entfernen
+
   - "Weiter" geht zur nächsten Seite (Schnitte werden übertragen)
   - "PDF exportieren" erzeugt das Ausgabe-PDF
 """
@@ -33,6 +36,17 @@ A4_W = 595.276          # A4 Breite in Punkten
 A4_H = 841.890          # A4 Höhe in Punkten
 EXPORT_DPI        = 300       # Auflösung für rotierte Streifen
 EXPORT_SCALE      = EXPORT_DPI / 72
+
+# "Linker Rand" (X-Kante) ist vorerst deaktiviert (setzen + anzeigen) — gehört
+# konzeptionell zum geplanten X-Modus (siehe ROADMAP.md), der noch nicht existiert.
+# Bestehende Werte lassen sich weiterhin per Rechtsklick auf die Randlinie löschen.
+LEFT_MARGIN_ENABLED = False
+
+NP_ZONE_FRAC  = 0.50          # linke 50 % der Seitenbreite = Nullzeilen-Klickzone
+NP_SCAN_X     = 0             # fester X-Anker für Notenlinien-Erkennung (unabhängig vom Klick-X in der Zone)
+NP_MARGIN_TOP = 8 * MM        # Abstand oberhalb Nullpunkt (Punkte)
+NP_MARGIN_BOT = 30 * MM       # Abstand unterhalb Nullpunkt (Punkte)
+NP_BOTTOM_GAP = 4 * MM        # Zusätzliche Lücke zwischen Streifen (Untergrenze = nächster NP − 12 mm)
 
 # Export-Presets (page_w, page_h, margin_top, margin_bottom, margin_left, gap)
 EXPORT_PRESETS = {
@@ -63,12 +77,19 @@ class StripApp:
 
         # Pro Seite: Rotation in Grad (wird von übernächster Seite geerbt)
         self.rotation_per_page: dict[int, float] = {}
+        self._rotation_manual: set[int] = set()   # Seiten mit manuell gesetzter Rotation
+        self._rotation_scanned: set[int] = set()  # Seiten die bereits auto-gescannt wurden
+
+        self._updating_ui = False   # Guard gegen rekursive _on_rotation_changed-Aufrufe
 
         # Pro Seite: linker Rand in PDF-Punkten (None = kein benutzerdefinierter Rand)
         self.left_margin_per_page: dict[int, float] = {}
 
         # Aktuell angezeigte Seite als PhotoImage (muss als Referenz gehalten werden)
         self._photo = None
+        self._page_img = None         # PIL-Kopie für Staff-Snap
+        self._snap_y: float | None = None       # aktueller Y-Snap (canvas-Koordinaten)
+        self._snap_x: float | None = None       # aktueller X-Snap (canvas-Koordinaten, linker Rand)
 
         # Pro Seite: Taktzahlen je Streifen (Index = sortierte Streifen-Position)
         self.takt_per_page: dict[int, list[int]] = {}
@@ -78,6 +99,8 @@ class StripApp:
         # Drag-State
         self._drag_line_index = None
         self._drag_start_y = None
+        self._shift_lock_idx: int | None = None  # Shift-Lock: fixiertes Linien-Ziel
+        self._drag_line_sibling: int | None = None  # Doppelkante: mitgezogener Zwilling
 
         # Taktzahl-Klick-Flag (verhindert Doppel-Event canvas + tag)
         self._takt_click_handled = False
@@ -90,6 +113,17 @@ class StripApp:
 
         # Seitenwechsel-Marker: (page_idx, local_idx) → neue Seite erzwingen
         self.pagebreak_set: set[tuple[int, int]] = set()
+
+        # Nullzeilen (Anfang Notensystem): pro Seite Liste von (y_pdf, orig_top)
+        # orig_top = erzeugter top-Schnitt-Wert (dient als Anker beim Drag)
+        self._np_points: dict[int, list[tuple[float, float]]] = {}
+        self._drag_np_index: int | None = None      # NP-Raute wird gezogen
+        self._drag_np_top_idx: int | None = None    # NP-Oberkante (rote Linie) wird gezogen
+        self._drag_np_bot_idx: int | None = None    # NP-Untergrenze (grüne Linie) wird gezogen
+        # Gesetzte NP-Obergrenzen: (page_idx, np_idx) → nicht überschreiben
+        self._np_manual: set[tuple[int, int]] = set()
+        # Gesetzte NP-Untergrenzen: (page_idx, np_idx) → nicht von _update_prev_np_bottom überschreiben
+        self._np_manual_bot: set[tuple[int, int]] = set()
 
         self._build_ui()
         self._set_icon()
@@ -115,15 +149,20 @@ class StripApp:
             ("E / →",           "Nächste Seite"),
             ("Page Up/Down",    "Vorherige / Nächste Seite"),
             ("",                ""),
-            ("Schnitte",        ""),
+            ("Schnitte (rechte Seite)", ""),
             ("Linksklick",      "Schnittlinie setzen"),
+            ("Klick im Streifen", "Unterkante verschieben"),
             ("Drag",            "Linie verschieben"),
-            ("Rechtsklick",     "Linie löschen / linken Rand setzen"),
+            ("Rechtsklick",     "Linie löschen"),
             ("Delete / ←",      "Letzte Linie entfernen"),
             ("",                ""),
-            ("Streifen-Zonen",   ""),
-            ("↓ Klick (Mitte)",  "Unterkante verschieben"),
-            ("← Klick (links)",  "Linken Rand setzen"),
+            ("Anker (linke Seite)", ""),
+            ("Hover",            "Y snapt auf Notenlinie (blauer Strich)"),
+            ("Klick",            "Anker + Streifen sofort erzeugen"),
+            ("Drag",              "Bestehenden Anker vertikal verschieben"),
+            ("Rechtsklick",       "Anker entfernen"),
+            ("⟳ Anker füllen",  "Seite füllen (≥2 Anker nötig)"),
+            ("⟳ Alle Seiten",  "Alle leeren Seiten füllen"),
             ("",                ""),
             ("Taktzahlen",      ""),
             ("Linksklick [N]",  "Taktzahl +1 (propagiert)"),
@@ -208,6 +247,8 @@ class StripApp:
         self.page_label.pack(side=tk.LEFT, padx=8)
         tk.Button(toolbar, text="Letzte Linie entfernen", command=self.remove_last_line).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Button(toolbar, text="Seite leeren", command=self.clear_lines).pack(side=tk.LEFT, padx=4, pady=2)
+        tk.Button(toolbar, text="⟳ Anker füllen", command=self.np_fill_page).pack(side=tk.LEFT, padx=4, pady=2)
+        tk.Button(toolbar, text="⟳ Alle Seiten", command=self.np_fill_all_pages).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Label(toolbar, text="  Zoom:").pack(side=tk.LEFT)
         tk.Button(toolbar, text="−", width=2, command=self.zoom_out).pack(side=tk.LEFT, padx=2, pady=2)
         tk.Button(toolbar, text="+", width=2, command=self.zoom_in).pack(side=tk.LEFT, padx=2, pady=2)
@@ -266,6 +307,15 @@ class StripApp:
         self.canvas.bind("<Button-4>", self.on_mousewheel)            # Linux scroll up
         self.canvas.bind("<Button-5>", self.on_mousewheel)            # Linux scroll down
 
+        # Tooltips für die Zonen-Beschriftungen (Anker/Schnitte). Manuelle
+        # Bereichsprüfung in on_mouse_move statt tag_bind Enter/Leave, da der
+        # NP-Zone-Hover laufend Canvas-Elemente neu zeichnet und das die
+        # Enter/Leave-Erkennung von Tag-Events unzuverlässig macht.
+        self._tooltip_win = None
+        self._anker_hint_bbox = None
+        self._schnitte_hint_bbox = None
+        self._hint_shown = None
+
         # Tastaturshortcuts
         self.root.bind("<Right>", lambda e: self.next_page())
         self.root.bind("<Left>", lambda e: self.prev_page())
@@ -302,10 +352,15 @@ class StripApp:
         self.page_index = 0
         self.cuts_per_page = {}
         self.rotation_per_page = {}
+        self._rotation_manual = set()
+        self._rotation_scanned = set()
         self.left_margin_per_page = {}
         self.takt_per_page = {}
         self.takt_manual = set()
         self.pagebreak_set = set()
+        self._np_points = {}
+        self._np_manual = set()
+        self._np_manual_bot = set()
         self._update_rotation_ui()
         self.render_page()
         self.status.config(text=f"Geöffnet: {path}")
@@ -320,8 +375,28 @@ class StripApp:
         mat = fitz.Matrix(self.scale, self.scale).prerotate(rotation)
         pix = page.get_pixmap(matrix=mat)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        self._photo = ImageTk.PhotoImage(img)
+        self._page_img = img          # PIL-Kopie für Staff-Snap behalten
 
+        # Auto-Rotation: nur beim ersten Besuch der Seite (nicht manuell gesetzt)
+        # _rotation_scanned verhindert Endlosrekursion und doppelten Scan
+        # Auto-Detect nur wenn: noch nicht gescannt, nicht manuell, und keine
+        # geerbte Rotation (sonst detektieren wir das bereits korrigierte Bild)
+        inherited = self.rotation_per_page.get(self.page_index, 0.0)
+        if (self.page_index not in self._rotation_scanned
+                and self.page_index not in self._rotation_manual
+                and inherited == 0.0):
+            self._rotation_scanned.add(self.page_index)
+            angle = self._auto_detect_rotation()
+            if angle is not None and angle != 0.0:
+                self.rotation_per_page[self.page_index] = angle
+                self._update_rotation_ui()
+                self.status.config(
+                    text=f"Seite {self.page_index+1}: Rotation {angle:+.1f}° automatisch erkannt")
+                self.render_page()
+                return
+        self._rotation_scanned.add(self.page_index)
+
+        self._photo = ImageTk.PhotoImage(img)
         self.canvas.delete("all")
         self.canvas.config(scrollregion=(0, 0, pix.width, pix.height))
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self._photo)
@@ -329,25 +404,96 @@ class StripApp:
         self.page_label.config(text=f"Seite {self.page_index + 1} / {self.page_count}")
         self._draw_lines()
 
+    def _update_zone_tooltip(self, event, x_canvas, y_canvas):
+        """Zeigt/versteckt den Anker/Schnitte-Tooltip je nach Cursor-Position.
+        Manuelle Bereichsprüfung statt tag_bind Enter/Leave, siehe __init__."""
+        def inside(bbox):
+            return bbox is not None and bbox[0] <= x_canvas <= bbox[2] and bbox[1] <= y_canvas <= bbox[3]
+
+        if inside(self._anker_hint_bbox):
+            hint = "anker"
+        elif inside(self._schnitte_hint_bbox):
+            hint = "schnitte"
+        else:
+            hint = None
+
+        if hint == self._hint_shown:
+            return
+        self._hint_shown = hint
+        if hint == "anker":
+            self._show_tooltip(event, "Anker", "Auf der linken Seite setzt Du einen Anker auf die "
+                                               "oberste Notenlinie pro System.")
+        elif hint == "schnitte":
+            self._show_tooltip(event, "Schnitte", "Auf der rechten Seite definierst Du die Schnitte mit "
+                                                  "Klick (Ober- und Unterkanten) und mit Ctrl+Klick "
+                                                  "kombinierte Kanten.")
+        else:
+            self._hide_tooltip()
+
+    def _show_tooltip(self, event, title, body):
+        self._hide_tooltip()
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+        frame = tk.Frame(win, bg="#222222", bd=1, relief=tk.SOLID)
+        frame.pack()
+        tk.Label(frame, text=title, bg="#222222", fg="#ffffff",
+                font=("Helvetica", 9, "bold"), anchor="w").pack(fill=tk.X, padx=6, pady=(4, 0))
+        tk.Label(frame, text=body, bg="#222222", fg="#dddddd",
+                font=("Helvetica", 9), wraplength=260, justify=tk.LEFT).pack(padx=6, pady=(0, 4))
+        self._tooltip_win = win
+
+    def _hide_tooltip(self):
+        if self._tooltip_win is not None:
+            self._tooltip_win.destroy()
+            self._tooltip_win = None
+
     def _draw_lines(self):
         """Zeichnet alle Schnittlinien der aktuellen Seite."""
         self.canvas.delete("line")
         cuts = self.cuts_per_page.get(self.page_index, [])
         page_height = self.doc[self.page_index].rect.height
 
-        for i, y_pdf in enumerate(cuts):
+        w = int(self.doc[self.page_index].rect.width * self.scale)
+        n_cuts = len(cuts)
+        i = 0
+        while i < n_cuts:
+            # Doppelkante: Unterkante (i ungerade) + nächste Oberkante (i+1),
+            # exakt gleiche Höhe -> als eine orange Linie mit 2 Labels zeichnen
+            if i % 2 == 1 and i + 1 < n_cuts and abs(cuts[i] - cuts[i + 1]) < 0.5:
+                y_canvas = self._pdf_to_canvas_y(cuts[i], page_height)
+                self.canvas.create_line(0, y_canvas, w, y_canvas,
+                                        fill="#9b59b6", width=2,
+                                        tags=("line", f"line_{i}", f"line_{i + 1}"))
+                self.canvas.create_text(w - 8, y_canvas - 18, text=f"unten {i // 2 + 1}",
+                                        fill="#2ecc71", anchor=tk.E, tags="line")
+                self.canvas.create_text(w - 8, y_canvas + 6, text=f"oben {i // 2 + 2}",
+                                        fill="#e74c3c", anchor=tk.E, tags="line")
+                i += 2
+                continue
+
+            y_pdf = cuts[i]
             y_canvas = self._pdf_to_canvas_y(y_pdf, page_height)
-            # Abwechselnd: gerade = oben (rot), ungerade = unten (grün)
             color = "#e74c3c" if i % 2 == 0 else "#2ecc71"
             label = "oben" if i % 2 == 0 else "unten"
-            w = int(self.doc[self.page_index].rect.width * self.scale)
+            # Gestrichelt = auto (NP), durchgezogen = manuell
+            ref_top = cuts[i] if i % 2 == 0 else (cuts[i - 1] if i > 0 else None)
+            np_idx = self._find_np_by_top(ref_top) if ref_top is not None else None
+            auto = np_idx is not None and (self.page_index, np_idx) not in self._np_manual
+            dash = (6, 4) if auto else ()
             self.canvas.create_line(0, y_canvas, w, y_canvas,
-                                    fill=color, width=2, tags=("line", f"line_{i}"))
-            self.canvas.create_text(8, y_canvas - 8, text=f"{label} {i // 2 + 1}",
-                                    fill=color, anchor=tk.W, tags="line")
+                                    fill=color, width=2, dash=dash,
+                                    tags=("line", f"line_{i}"))
+            self.canvas.create_text(w - 8, y_canvas - 8, text=f"{label} {i // 2 + 1}",
+                                    fill=color, anchor=tk.E, tags="line")
+            i += 1
 
         # Streifen farbig hinterlegen
         self._draw_strips()
+
+        # Nullpunkt-Marker
+        self._draw_np_markers(page_height)
 
         # Seitenwechsel-Marker
         self._draw_pagebreak_markers(page_height)
@@ -410,6 +556,434 @@ class StripApp:
             self.canvas.create_line(x_canvas, 0, x_canvas, h,
                                     fill="#3399ff", width=2, dash=(6, 4),
                                     tags=("line", "left_margin"))
+
+    # ------------------------------------------------- Nullpunkte ------------
+
+    def _is_np_zone(self, x_canvas):
+        """True wenn x_canvas in der linken NP_ZONE_FRAC der Seitenbreite liegt."""
+        if self.doc is None:
+            return False
+        page_w = self.doc[self.page_index].rect.width * self.scale
+        return x_canvas < page_w * NP_ZONE_FRAC
+
+    def _update_prev_np_bottom(self, new_y_top):
+        """Setzt die Untergrenze des zuletzt gesetzten NP-Streifens (mit Lücke).
+        Überspringt wenn die Untergrenze bereits manuell/per Propagation gesetzt wurde."""
+        points = self._np_points.get(self.page_index, [])
+        if len(points) == 0:
+            return
+        prev_idx = len(points) - 1
+        if (self.page_index, prev_idx) in self._np_manual_bot:
+            return
+        _, prev_orig_top = points[prev_idx]
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        for j in range(0, len(cuts) - 1, 2):
+            if abs(cuts[j] - prev_orig_top) < 1.0:
+                cuts[j + 1] = new_y_top - NP_BOTTOM_GAP
+                break
+
+    def _add_nullpunkt(self, y_canvas):
+        """Setzt eine Nullzeile sortiert nach Y und erzeugt das zugehörige Streifen-Paar.
+        Y snapt auf erkannte Notenlinie (bereits gesnappt übergeben)."""
+        y_pdf = y_canvas / self.scale
+        page_height = self.doc[self.page_index].rect.height
+        points = self._np_points.setdefault(self.page_index, [])
+        cuts = self.cuts_per_page.setdefault(self.page_index, [])
+
+        y_top = max(0.0, y_pdf - NP_MARGIN_TOP)
+
+        # Einfügeposition nach Y bestimmen
+        insert_pos = next((i for i, (yp, _) in enumerate(points) if yp > y_pdf),
+                          len(points))
+        prev = points[insert_pos - 1] if insert_pos > 0 else None
+        nxt  = points[insert_pos]     if insert_pos < len(points) else None
+
+        # Untergrenze: Abstand zum Vorgänger oder Nachfolger ableiten
+        if prev is not None:
+            _, prev_top = prev
+            strip_h = y_top - prev_top
+            y_bot = min(page_height, y_top + max(strip_h, NP_MARGIN_BOT))
+        elif nxt is not None:
+            _, nxt_top = nxt
+            strip_h = nxt_top - y_top
+            y_bot = min(page_height, y_top + max(strip_h, NP_MARGIN_BOT))
+        else:
+            y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
+
+        # _np_manual-Indizes für Nachfolger verschieben (top und bot)
+        self._np_manual = {
+            (p, k) if p != self.page_index or k < insert_pos else (p, k + 1)
+            for p, k in self._np_manual
+        }
+        self._np_manual_bot = {
+            (p, k) if p != self.page_index or k < insert_pos else (p, k + 1)
+            for p, k in self._np_manual_bot
+        }
+
+        # NP einfügen — einzeln per Klick gesetzt = sofort fixiert (snap to grid),
+        # wird nie automatisch von einer anderen Nullzeile mitgezogen
+        points.insert(insert_pos, (y_pdf, y_top))
+        self._np_manual.add((self.page_index, insert_pos))
+
+        # Cuts einfügen: Position im cuts-Array = insert_pos * 2
+        cuts.insert(insert_pos * 2, y_top)
+        cuts.insert(insert_pos * 2 + 1, y_bot)
+
+        # Untergrenze des Vorgängers anpassen — nur wenn nicht manuell gesetzt
+        prev_np_idx = insert_pos - 1
+        if prev is not None and (self.page_index, prev_np_idx) not in self._np_manual_bot:
+            _, prev_top = prev
+            for j in range(0, len(cuts) - 1, 2):
+                if abs(cuts[j] - prev_top) < 1.0:
+                    cuts[j + 1] = y_top - NP_BOTTOM_GAP
+                    break
+
+        # Obergrenze des Nachfolgers anpassen (Streifenhöhe beibehalten)
+        if nxt is not None:
+            _, nxt_top = nxt
+            cuts[insert_pos * 2 + 1] = nxt_top - NP_BOTTOM_GAP
+
+        n = len(points)
+        self.status.config(
+            text=f"Anker {insert_pos + 1}/{n} gesetzt (y={y_pdf:.0f} pt)")
+        self._draw_lines()
+
+    def _draw_np_markers(self, page_height):
+        """Zeichnet NP-Zonengrenze und Nullzeilen-Marker (horizontale Linie)."""
+        page_w = self.doc[self.page_index].rect.width * self.scale
+        h = page_height * self.scale
+        x_zone = page_w * NP_ZONE_FRAC
+        self.canvas.create_line(x_zone, 0, x_zone, h,
+                                fill="#00bb44", width=1, dash=(1, 3),
+                                tags="line")
+        zone_font = ("Helvetica", 9, "bold")
+        for text, x, anchor, attr in (("← Anker", x_zone - 10, tk.E, "_anker_hint_bbox"),
+                                      ("Schnitte →", x_zone + 10, tk.W, "_schnitte_hint_bbox")):
+            item = self.canvas.create_text(x, 14, text=text, fill="#eafff2",
+                                           anchor=anchor, font=zone_font, tags="line")
+            bbox = self.canvas.bbox(item)
+            pad_bbox = (bbox[0] - 4, bbox[1] - 2, bbox[2] + 4, bbox[3] + 2)
+            self.canvas.create_rectangle(*pad_bbox, fill="#1a3a2a", outline="#00bb44", tags="line")
+            self.canvas.tag_raise(item)
+            setattr(self, attr, pad_bbox)
+        for y_pdf, _ in self._np_points.get(self.page_index, []):
+            yc = y_pdf * self.scale
+            r = 6
+            self.canvas.create_line(0, yc, x_zone, yc,
+                                    fill="#00cc44", width=2,
+                                    tags=("line", "np_marker"))
+            self.canvas.create_oval(
+                x_zone / 2 - r, yc - r, x_zone / 2 + r, yc + r,
+                fill="#00cc44", outline="#ffffff", width=1,
+                tags=("line", "np_marker")
+            )
+
+    def _snap_to_staff(self, x_canvas, y_canvas, search_px=60):
+        """Sucht die OBERSTE Notenlinie des Notensystems beim Cursor.
+        Strategie:
+        1. Horizontale Linien im Suchfenster erkennen (niedrige Varianz).
+        2. Kandidaten zu Gruppen zusammenfassen (±2px → eine Linie).
+        3. Nächste Gruppe zum Cursor bestimmen.
+        4. Linien-Abstand (Spacing) aus benachbarten Gruppen berechnen.
+        5. Von der nächsten Linie so weit nach oben gehen, wie weitere
+           äquidistante Linien gefunden werden → oberste Linie zurückgeben.
+        Senkrechte Linien/Klammern haben hohe Varianz → werden ignoriert."""
+        if self._page_img is None:
+            return None
+        img = self._page_img
+        # Grosse Suchregion: 50px über und 60px unter dem Cursor.
+        # 120px rechts versetzt: Schlüssel + Vorzeichen überspringen,
+        # dort sind die Notenlinien sauber und horizontal durchgehend.
+        x0 = max(0, int(x_canvas) + 120)
+        x1 = min(img.width, x0 + 120)
+        y0 = max(0, int(y_canvas) - 50)
+        y1 = min(img.height, int(y_canvas) + search_px)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        region = img.crop((x0, y0, x1, y1)).convert('L')
+        w, h = region.size
+        if w < 10 or h == 0:
+            return None
+        data = region.tobytes()
+        rows = [data[r * w:(r + 1) * w] for r in range(h)]
+        row_avgs = [sum(r) / w for r in rows]
+        avg_all = sum(row_avgs) / len(row_avgs)
+        threshold = min(200, avg_all * 0.80)
+
+        raw = []
+        for i, (avg, row) in enumerate(zip(row_avgs, rows)):
+            if avg >= threshold:
+                continue
+            variance = sum((v - avg) ** 2 for v in row) / w
+            if variance < 1200:
+                raw.append(i)
+
+        if not raw:
+            return None
+
+        # Kandidaten clustern: aufeinanderfolgende Pixel-Zeilen → eine Linie
+        clusters = []
+        for r in raw:
+            if clusters and r - clusters[-1] <= 2:
+                clusters[-1] = (clusters[-1] + r) // 2
+            else:
+                clusters.append(r)
+
+        # Nächste Gruppe zum Cursor
+        cursor_rel = int(y_canvas) - y0
+        nearest = min(clusters, key=lambda r: abs(r - cursor_rel))
+        if abs(nearest - cursor_rel) > 25:
+            return None
+
+        # Spacing aus benachbarten Gruppen bestimmen
+        spacing = None
+        if len(clusters) >= 2:
+            spacings = [clusters[k + 1] - clusters[k]
+                        for k in range(len(clusters) - 1)
+                        if 3 <= clusters[k + 1] - clusters[k] <= 25]
+            if spacings:
+                spacing = sum(spacings) / len(spacings)
+
+        if spacing is None:
+            return float(y0 + nearest)
+
+        # Von der nächsten Linie nach OBEN zur obersten Systemlinie steigen
+        top = nearest
+        for _ in range(4):   # max 4 Schritte (5-liniges System)
+            expected = top - spacing
+            match = min(clusters, key=lambda r: abs(r - expected))
+            if abs(match - expected) < spacing * 0.35 and match < top:
+                top = match
+            else:
+                break
+        return float(y0 + top)
+
+    def _snap_to_vertical(self, x_canvas, y_canvas, search_px=18):
+        """Sucht die nächste senkrechte Linie links/rechts vom Cursor.
+        Senkrechte Linie = dunkle Spalte mit niedriger Zeilen-Varianz."""
+        if self._page_img is None:
+            return None
+        img = self._page_img
+        x0 = max(0, int(x_canvas) - search_px)
+        x1 = min(img.width, int(x_canvas) + search_px)
+        y0 = max(0, int(y_canvas) - 20)
+        y1 = min(img.height, int(y_canvas) + 20)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        region = img.crop((x0, y0, x1, y1)).convert('L')
+        w, h = region.size
+        if w < 4 or h < 4:
+            return None
+        data = region.tobytes()   # bytes, direkt indexierbar, kein getdata()
+        cols = [[data[r * w + c] for r in range(h)] for c in range(w)]
+        col_avgs = [sum(c) / h for c in cols]
+        avg_all = sum(col_avgs) / len(col_avgs)
+        threshold = min(200, avg_all * 0.80)
+        candidates = []
+        for i, (avg, col) in enumerate(zip(col_avgs, cols)):
+            if avg >= threshold:
+                continue
+            variance = sum((v - avg) ** 2 for v in col) / h
+            if variance < 1200:
+                candidates.append(i)
+        if not candidates:
+            return None
+        # Nächste Spalte zum Cursor
+        cursor_rel = int(x_canvas) - x0
+        best = min(candidates, key=lambda c: abs(c - cursor_rel))
+        return float(x0 + best)
+
+    def _auto_detect_rotation(self):
+        """Blind-Scan: versucht mehrere Y-Positionen, nimmt Median der Ergebnisse.
+        Wird beim ersten Rendern einer Seite aufgerufen (kein Y-Hinweis nötig).
+        Vorzeichen-Korrektur: PIL Y-Achse zeigt nach unten → Winkel negieren.
+        Ausreisser-Filter: Werte die > 1° vom Vorläufig-Median abweichen, werden verworfen."""
+        if self._page_img is None:
+            return None
+        h = self._page_img.height
+        # 9 Samples von 20–60% in 5%-Schritten: Notenbereich, kein Fuss/Leerraum
+        fractions = (0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60)
+        angles = []
+        for f in fractions:
+            a = self._detect_page_rotation(int(h * f))
+            if a is not None:
+                angles.append(a)
+        if len(angles) < 3:
+            return None
+        # Vorläufiger Median
+        angles.sort()
+        prelim = angles[len(angles) // 2]
+        # Ausreisser entfernen (Abweichung > 0.5° vom vorläufigen Median)
+        filtered = [a for a in angles if abs(a - prelim) <= 0.5]
+        # Mindestens 4 konsistente Werte (Mehrheit von 7 Samples)
+        if len(filtered) < 4:
+            return None
+        # Wertebereich ≤ 0.5° (sehr konsistente Messung)
+        if filtered[-1] - filtered[0] > 0.5:
+            return None
+        median = filtered[len(filtered) // 2]
+        # PIL Y nach unten → Vorzeichen invertieren für fitz prerotate
+        result = -median
+        return 0.0 if abs(result) < 0.25 else result
+
+    def _detect_page_rotation(self, y_canvas):
+        """Ermittelt Seitenrotation aus der Steigung der obersten Systemlinie.
+        Tastet die Notenlinie an 6 gleichmässig verteilten X-Positionen (15%–85%
+        der Seitenbreite) ab und berechnet per linearer Regression den Winkel.
+        Gibt None zurück wenn zu wenige Punkte oder Winkel unrealistisch (>5°)."""
+        import math
+        if self._page_img is None:
+            return None
+        img = self._page_img
+        n_samples = 6
+        # Scan-Positionen in Bild-Pixel: 15% bis 85% der Seitenbreite
+        scan_positions = [int(img.width * (0.15 + 0.70 * i / (n_samples - 1)))
+                          for i in range(n_samples)]
+        points = []
+        for sx in scan_positions:
+            # _snap_to_staff erwartet x_canvas so dass x_canvas+120 = Scan-Startpunkt
+            y = self._snap_to_staff(sx - 120, y_canvas, search_px=40)
+            if y is not None:
+                points.append((sx, y))
+        if len(points) < 3:
+            return None
+        # Lineare Regression: y = m*x + b
+        n = len(points)
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        x_mean = sum(xs) / n
+        y_mean = sum(ys) / n
+        num = sum((xs[i] - x_mean) * (ys[i] - y_mean) for i in range(n))
+        den = sum((xs[i] - x_mean) ** 2 for i in range(n))
+        if abs(den) < 1:
+            return None
+        slope = num / den
+        angle = math.degrees(math.atan(slope))
+        if abs(angle) > 5.0:   # unrealistische Werte ignorieren
+            return None
+        return round(angle * 2) / 2   # auf 0.5° runden
+
+    def _draw_snap_indicator(self, y_canvas, snapped):
+        """Zeichnet Y-Vorschau in der NP-Zone: eingerastet (Notenlinie erkannt,
+        hell) oder frei schwebend (keine Linie erkannt, rohe Mausposition, matt)."""
+        self.canvas.delete("snap_indicator")
+        if y_canvas is None:
+            return
+        page_w = (self.doc[self.page_index].rect.width * self.scale if self.doc else 200)
+        x_zone = page_w * NP_ZONE_FRAC
+        r = 7
+        xc = x_zone / 2
+        color = "#00ff66" if snapped else "#4d7a5f"
+        self.canvas.create_oval(xc - r, y_canvas - r, xc + r, y_canvas + r,
+                                outline=color, width=2,
+                                tags="snap_indicator")
+        self.canvas.create_line(0, y_canvas, x_zone, y_canvas,
+                                fill=color, width=1, dash=(2, 4),
+                                tags="snap_indicator")
+
+    def _draw_snap_x_indicator(self, x_canvas):
+        """Zeichnet X-Snap-Indikator (senkrechte Linie)."""
+        self.canvas.delete("snap_x_indicator")
+        if x_canvas is None or self.doc is None:
+            return
+        h = self.doc[self.page_index].rect.height * self.scale
+        self.canvas.create_line(x_canvas, 0, x_canvas, h,
+                                fill="#00ccff", width=1, dash=(3, 5),
+                                tags="snap_x_indicator")
+        r = 6
+        self.canvas.create_oval(x_canvas - r, 0, x_canvas + r, r * 2,
+                                outline="#00ccff", width=2,
+                                tags="snap_x_indicator")
+
+    def _find_np_by_top(self, y_val):
+        """Gibt den NP-Index zurück, dessen orig_top mit y_val übereinstimmt, sonst None."""
+        if y_val is None:
+            return None
+        for i, (_, orig_top) in enumerate(self._np_points.get(self.page_index, [])):
+            if abs(orig_top - y_val) < 1.0:
+                return i
+        return None
+
+    def _propagate_np_top(self, np_idx, new_top):
+        """Propagiert geänderten Top-Offset zu allen folgenden nicht-manuellen NPs."""
+        points = self._np_points.get(self.page_index, [])
+        if np_idx >= len(points):
+            return
+        y_np, _ = points[np_idx]
+        new_offset = y_np - new_top
+        points[np_idx] = (y_np, new_top)
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        for k in range(np_idx + 1, len(points)):
+            if (self.page_index, k) in self._np_manual:
+                break
+            yk, old_top_k = points[k]
+            new_top_k = yk - new_offset
+            for j in range(0, len(cuts) - 1, 2):
+                if abs(cuts[j] - old_top_k) < 1.0:
+                    cuts[j] = new_top_k
+                    break
+            points[k] = (yk, new_top_k)
+
+    def _propagate_np_bot(self, np_idx, new_bot):
+        """Propagiert geänderte Untergrenze als Ziel-HÖHE zu allen folgenden auto-Streifen.
+        Nur der direkt gezogene Streifen wird manuell (solid); die propagierten bleiben
+        gestrichelt/auto und folgen zukünftigen Anpassungen weiterhin.
+        Stoppt an der ersten manuell gesetzten Untergrenze."""
+        points = self._np_points.get(self.page_index, [])
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        if np_idx >= len(points):
+            return
+        _, orig_top = points[np_idx]
+        page_height = self.doc[self.page_index].rect.height
+
+        # Gezogenen Streifen setzen, neue Ziel-Höhe ableiten
+        strip_top = None
+        for j in range(0, len(cuts) - 1, 2):
+            if abs(cuts[j] - orig_top) < 1.0:
+                strip_top = cuts[j]
+                cuts[j + 1] = new_bot
+                break
+        else:
+            return
+        new_H = new_bot - strip_top   # Ziel-Höhe für Nachfolger
+
+        # Alle folgenden auto-Streifen auf gleiche Höhe setzen (nur schrumpfen)
+        for k in range(np_idx + 1, len(points)):
+            if (self.page_index, k) in self._np_manual_bot:
+                break   # An manuell gesetzter Linie stoppen
+            _, top_k = points[k]
+            for j in range(0, len(cuts) - 1, 2):
+                if abs(cuts[j] - top_k) < 1.0:
+                    cuts[j + 1] = min(cuts[j] + new_H, page_height)
+                    break
+            # NICHT zu _np_manual_bot hinzufügen → bleibt gestrichelt/auto
+
+        # Nur den direkt gezogenen Streifen als manuell markieren (solid)
+        self._np_manual_bot.add((self.page_index, np_idx))
+
+    def _delete_np_and_strip(self, np_idx):
+        """Löscht einen Nullpunkt und das zugehörige Streifen-Paar."""
+        points = self._np_points.get(self.page_index, [])
+        if np_idx >= len(points):
+            return
+        _, orig_top = points[np_idx]
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        for j in range(0, len(cuts) - 1, 2):
+            if abs(cuts[j] - orig_top) < 1.0:
+                del cuts[j:j + 2]
+                break
+        points.pop(np_idx)
+        new_manual = set()
+        for p, k in self._np_manual:
+            if p != self.page_index:
+                new_manual.add((p, k))
+            elif k < np_idx:
+                new_manual.add((p, k))
+            elif k > np_idx:
+                new_manual.add((p, k - 1))
+        self._np_manual = new_manual
+        self._draw_lines()
+        self.status.config(text="Anker und Streifen gelöscht.")
 
     # ------------------------------------------------- Taktzahlen ------------
 
@@ -640,6 +1214,8 @@ class StripApp:
         k = self._find_strip_at(y_canvas)
         if k is None:
             return None
+        if not LEFT_MARGIN_ENABLED:
+            return 'bottom'
         left_x_pdf = self.left_margin_per_page.get(self.page_index, 0)
         if x_canvas < left_x_pdf * self.scale + LEFT_ZONE_PX:
             return 'left'
@@ -655,9 +1231,48 @@ class StripApp:
                 return i
         return None
 
+    def _find_shift_lock_target(self, y_canvas):
+        """Shift-Lock: findet die zwei Linien, die y_canvas einschliessen
+        (unabhängig davon, zu welchem Streifen sie gehören — funktioniert
+        auch bei überlappenden Streifen), und gibt den Index derjenigen
+        zurück, auf deren Seite des Mittelpunkts der Cursor steht.
+        Sonderfall Doppelkante: liegt die nächstgelegene Linie exakt auf
+        einer zweiten (Unterkante+Oberkante an derselben Stelle), entscheidet
+        die Cursor-Seite direkt, welche der beiden gemeint ist."""
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        if not cuts:
+            return None
+        page_height = self.doc[self.page_index].rect.height
+        canvas_ys = [(i, self._pdf_to_canvas_y(y, page_height)) for i, y in enumerate(cuts)]
+
+        nearest_idx, nearest_y = min(canvas_ys, key=lambda t: abs(t[1] - y_canvas))
+        sibling = next((j for j, yj in canvas_ys if j != nearest_idx and abs(yj - nearest_y) < 0.5), None)
+        if sibling is not None:
+            unten_idx, oben_idx = (nearest_idx, sibling) if nearest_idx % 2 == 1 else (sibling, nearest_idx)
+            return unten_idx if y_canvas <= nearest_y else oben_idx
+
+        above = max((t for t in canvas_ys if t[1] <= y_canvas), key=lambda t: t[1], default=None)
+        below = min((t for t in canvas_ys if t[1] >= y_canvas), key=lambda t: t[1], default=None)
+        if above is None:
+            return below[0] if below else None
+        if below is None:
+            return above[0]
+        if above[0] == below[0]:
+            return above[0]
+        midpoint = (above[1] + below[1]) / 2
+        return above[0] if y_canvas < midpoint else below[0]
+
     def _update_cursor(self, x_canvas, y_canvas):
         """Setzt den Cursor je nach Nähe zu einer Linie."""
         if self.doc is None:
+            return
+        # NP-Zone: linke X% der Seite
+        if self._is_np_zone(x_canvas):
+            for yp, _ in self._np_points.get(self.page_index, []):
+                if abs(yp * self.scale - y_canvas) <= DRAG_TOLERANCE:
+                    self.canvas.config(cursor="sb_v_double_arrow")
+                    return
+            self.canvas.config(cursor="plus")
             return
         # Über Taktzahl-Label?
         items = self.canvas.find_overlapping(x_canvas - 1, y_canvas - 1,
@@ -692,10 +1307,45 @@ class StripApp:
         self.canvas.config(cursor="crosshair")
 
     def on_mouse_move(self, event):
-        if self._drag_line_index is not None:
+        x_canvas = self.canvas.canvasx(event.x)
+        y_canvas = self.canvas.canvasy(event.y)
+        self._update_zone_tooltip(event, x_canvas, y_canvas)
+        in_np_zone = self._is_np_zone(x_canvas) and self.doc is not None
+        shift_held = bool(event.state & 0x0001)
+        # Y-Snap in NP-Zone: eingerastet wenn erkannt, sonst frei schwebend
+        if in_np_zone:
+            self._snap_y = self._snap_to_staff(NP_SCAN_X, y_canvas)
+            preview_y = self._snap_y if self._snap_y is not None else y_canvas
+            self._draw_snap_indicator(preview_y, snapped=self._snap_y is not None)
+        else:
+            self._snap_y = None
+            self.canvas.delete("snap_indicator")
+        # X-Snap überall (für linken Rand) — vorerst deaktiviert
+        if LEFT_MARGIN_ENABLED and self.doc is not None:
+            self._snap_x = self._snap_to_vertical(x_canvas, y_canvas)
+            self._draw_snap_x_indicator(self._snap_x)
+        else:
+            self._snap_x = None
+            self.canvas.delete("snap_x_indicator")
+        # Shift-Lock: Ziel einmalig bestimmen, dann fixiert halten bis Shift
+        # losgelassen wird (nicht bei jeder Mausbewegung neu berechnen)
+        if not in_np_zone and shift_held and self.doc is not None:
+            if self._shift_lock_idx is None:
+                self._shift_lock_idx = self._find_shift_lock_target(y_canvas)
+        else:
+            self._shift_lock_idx = None
+        if self._drag_line_index is not None or self._drag_np_index is not None:
             return
-        self._update_cursor(self.canvas.canvasx(event.x),
-                            self.canvas.canvasy(event.y))
+        if self._shift_lock_idx is not None:
+            # Pfeil zeigt zur gesperrten Linie: nach oben wenn sie über dem
+            # Cursor liegt (Oberkante), nach unten wenn darunter (Unterkante)
+            page_height = self.doc[self.page_index].rect.height
+            locked_y = self._pdf_to_canvas_y(
+                self.cuts_per_page[self.page_index][self._shift_lock_idx], page_height)
+            cursor = "based_arrow_up" if locked_y < y_canvas else "based_arrow_down"
+            self.canvas.config(cursor=cursor)
+            return
+        self._update_cursor(x_canvas, y_canvas)
 
     def on_mouse_down(self, event):
         if self._takt_click_handled:
@@ -704,62 +1354,276 @@ class StripApp:
         if self.doc is None:
             return
         y_canvas = self.canvas.canvasy(event.y)
-        idx = self._find_nearby_line(y_canvas)
+        x_canvas = self.canvas.canvasx(event.x)
+
+        # NP-Zone: ausschliesslich Nullzeilen-Dinge, keine generelle Linien-Logik
+        # (symmetrisch zu on_right_click — links = alles Linien-Bezogene)
+        if self._is_np_zone(x_canvas):
+            points = self._np_points.get(self.page_index, [])
+            for i, (yp, _) in enumerate(points):
+                if abs(yp * self.scale - y_canvas) <= DRAG_TOLERANCE:
+                    self._drag_np_index = i
+                    self._drag_line_index = None
+                    self._drag_np_top_idx = None
+                    self.canvas.config(cursor="sb_v_double_arrow")
+                    return
+            # Kein Marker-Treffer: neue Nullzeile setzen (auch überlappend mit
+            # bestehenden Streifen erlaubt — z.B. für tiefe Töne, die noch zum
+            # oberen System zählen sollen)
+            locked_y = self._snap_y if self._snap_y is not None else y_canvas
+            self._add_nullpunkt(locked_y)
+            return
+
+        # Shift-Lock hat Vorrang vor der normalen Nähe-Erkennung
+        using_shift_lock = self._shift_lock_idx is not None
+        idx = self._shift_lock_idx if using_shift_lock else self._find_nearby_line(y_canvas)
         if idx is not None:
             # Drag-Modus: bestehende Linie verschieben
             self._drag_line_index = idx
             self._drag_start_y = y_canvas
             self.canvas.config(cursor="fleur")
+            # Doppelkante ohne Shift: beide Kanten zusammen greifen (nicht trennen).
+            # Mit Shift-Lock bewusst getrennt greifen (siehe _find_shift_lock_target).
+            self._drag_line_sibling = None
+            if not using_shift_lock:
+                cuts_all = self.cuts_per_page.get(self.page_index, [])
+                idx_y = cuts_all[idx]
+                self._drag_line_sibling = next(
+                    (j for j, y in enumerate(cuts_all) if j != idx and abs(y - idx_y) < 0.5), None)
+            # Erkennen ob NP-Ober- oder Untergrenze gezogen wird
+            self._drag_np_top_idx = None
+            self._drag_np_bot_idx = None
+            cuts_now = self.cuts_per_page.get(self.page_index, [])
+            if idx % 2 == 0 and idx < len(cuts_now):
+                self._drag_np_top_idx = self._find_np_by_top(cuts_now[idx])
+            elif idx % 2 == 1 and idx - 1 < len(cuts_now):
+                self._drag_np_bot_idx = self._find_np_by_top(cuts_now[idx - 1])
+            return
+
+        self._drag_line_index = None
+
+        y_pdf = self._canvas_to_pdf_y(y_canvas)
+        page_height = self.doc[self.page_index].rect.height
+        zone = self._strip_zone(x_canvas, y_canvas)
+
+        # Klick links im Streifen → linken Rand setzen
+        if zone == 'left':
+            x_eff = self._snap_x if self._snap_x is not None else x_canvas
+            x_pdf = x_eff / self.scale
+            self.left_margin_per_page[self.page_index] = x_pdf
+            self._draw_lines()
+            self.status.config(text=f"Linker Rand gesetzt: x={x_pdf:.1f} pt")
+            return
+
+        # Klick im Streifen (Rest) → Unterkante (grüne Linie) verschieben
+        k = self._find_strip_at(y_canvas)
+        if k is not None:
+            cuts = self.cuts_per_page[self.page_index]
+            cuts[2 * k + 1] = y_pdf
+            pairs = sorted(zip(range(len(cuts) // 2),
+                               zip(cuts[::2], cuts[1::2])),
+                           key=lambda x: x[1][0])
+            strip_nr = next(i + 1 for i, (ki, _) in enumerate(pairs) if ki == k)
+            self.status.config(
+                text=f"Streifen {strip_nr}: Unterkante → y={y_pdf:.1f} pt")
+            self._draw_lines()
+            return
+
+        # Neuen Schnitt setzen (grauer Bereich)
+        cuts = self.cuts_per_page.setdefault(self.page_index, [])
+        ctrl_held = bool(event.state & 0x0004)
+        if ctrl_held and len(cuts) % 2 == 1:
+            # Doppelkante: Unterkante des offenen Streifens + Oberkante des
+            # nächsten auf derselben Höhe (nahtlos aneinander, keine Lücke)
+            cuts.append(y_pdf)
+            cuts.append(y_pdf)
+            self.status.config(text=f"Seite {self.page_index + 1}: Doppelkante gesetzt (y={y_pdf:.1f} pt)")
         else:
-            self._drag_line_index = None
-            x_canvas = self.canvas.canvasx(event.x)
-            y_pdf = self._canvas_to_pdf_y(y_canvas)
-            page_height = self.doc[self.page_index].rect.height
-            zone = self._strip_zone(x_canvas, y_canvas)
-
-            # Klick links im Streifen → linken Rand setzen
-            if zone == 'left':
-                x_pdf = x_canvas / self.scale
-                self.left_margin_per_page[self.page_index] = x_pdf
-                self._draw_lines()
-                self.status.config(text=f"Linker Rand gesetzt: x={x_pdf:.1f} pt")
-                return
-
-            # Klick im Streifen (Rest) → Unterkante (grüne Linie) verschieben
-            k = self._find_strip_at(y_canvas)
-            if k is not None:
-                cuts = self.cuts_per_page[self.page_index]
-                cuts[2 * k + 1] = y_pdf
-                pairs = sorted(zip(range(len(cuts) // 2),
-                                   zip(cuts[::2], cuts[1::2])),
-                               key=lambda x: x[1][0])
-                strip_nr = next(i + 1 for i, (ki, _) in enumerate(pairs) if ki == k)
-                self.status.config(
-                    text=f"Streifen {strip_nr}: Unterkante → y={y_pdf:.1f} pt")
-                self._draw_lines()
-                return
-
-            # Neuen Schnitt setzen (grauer Bereich)
-            if self.page_index not in self.cuts_per_page:
-                self.cuts_per_page[self.page_index] = []
-            self.cuts_per_page[self.page_index].append(y_pdf)
-            n = len(self.cuts_per_page[self.page_index])
+            cuts.append(y_pdf)
+            n = len(cuts)
             kind = "Oberkante" if n % 2 == 1 else "Unterkante"
             self.status.config(text=f"Seite {self.page_index + 1}: {kind} Streifen {(n + 1) // 2} gesetzt (y={y_pdf:.1f} pt)")
-            self._draw_lines()
+        self._draw_lines()
+
+    def _drag_np(self, np_idx, y_canvas):
+        """Verschiebt eine Nullzeile vertikal. Y snapt auf Notenlinie.
+        Direktes Anfassen fixiert die Nullzeile (snap to grid, ground truth) —
+        sie wird danach nie mehr automatisch von einer anderen mitgezogen."""
+        points = self._np_points.get(self.page_index, [])
+        if np_idx >= len(points):
+            return
+        self._np_manual.add((self.page_index, np_idx))
+        # Y: snap wenn verfügbar, sonst freie Bewegung
+        if self._snap_y is not None:
+            y_canvas = self._snap_y
+        y_pdf = y_canvas / self.scale
+        y_old, orig_top = points[np_idx]
+        page_height = self.doc[self.page_index].rect.height
+        # NP-Reihenfolge erzwingen
+        if np_idx > 0:
+            y_pdf = max(y_pdf, points[np_idx - 1][0] + 1)
+        # Nachfolger werden mitgezogen → kein clamp nach unten nötig
+        delta_y = y_pdf - y_old
+        cuts = self.cuts_per_page.get(self.page_index, [])
+
+        # Diese Nullzeile verschieben
+        new_top = max(0.0, y_pdf - NP_MARGIN_TOP)
+        for j in range(0, len(cuts) - 1, 2):
+            if abs(cuts[j] - orig_top) < 1.0:
+                old_height = cuts[j + 1] - cuts[j]
+                cuts[j]     = new_top
+                cuts[j + 1] = min(page_height, new_top + old_height)
+                break
+        points[np_idx] = (y_pdf, new_top)
+
+        # Untergrenze des Vorgänger-Streifens mitziehen
+        if np_idx > 0:
+            _, prev_orig_top = points[np_idx - 1]
+            for j in range(0, len(cuts) - 1, 2):
+                if abs(cuts[j] - prev_orig_top) < 1.0:
+                    cuts[j + 1] = new_top - NP_BOTTOM_GAP
+                    break
+
+        # Alle folgenden auto-NPs um delta_y verschieben
+        for k in range(np_idx + 1, len(points)):
+            if (self.page_index, k) in self._np_manual:
+                break
+            yk, top_k = points[k]
+            new_yk = yk + delta_y
+            new_top_k = max(0.0, top_k + delta_y)
+            new_yk = max(new_yk, points[k - 1][0] + 1)
+            new_top_k = max(0.0, new_yk - NP_MARGIN_TOP)
+            for j in range(0, len(cuts) - 1, 2):
+                if abs(cuts[j] - top_k) < 1.0:
+                    old_h = cuts[j + 1] - cuts[j]
+                    cuts[j]     = new_top_k
+                    cuts[j + 1] = min(page_height, new_top_k + old_h)
+                    break
+            # Untergrenze von NP[k-1] anpassen
+            _, prev_top_k = points[k - 1]
+            for j in range(0, len(cuts) - 1, 2):
+                if abs(cuts[j] - prev_top_k) < 1.0:
+                    cuts[j + 1] = new_top_k - NP_BOTTOM_GAP
+                    break
+            points[k] = (new_yk, new_top_k)
+
+        self._draw_lines()
+
+    def _add_np_to_page(self, page_idx, y_pdf):
+        """NP ans Ende einer Seite anhängen (fill-Funktionen, immer aufsteigend)."""
+        page = self.doc[page_idx]
+        page_height = page.rect.height
+        y_top = max(0.0, y_pdf - NP_MARGIN_TOP)
+        points = self._np_points.setdefault(page_idx, [])
+        cuts = self.cuts_per_page.setdefault(page_idx, [])
+        if points:
+            _, prev_top = points[-1]
+            strip_h = y_top - prev_top
+            y_bot = min(page_height, y_top + max(strip_h, NP_MARGIN_BOT))
+            for j in range(0, len(cuts) - 1, 2):
+                if abs(cuts[j] - prev_top) < 1.0:
+                    cuts[j + 1] = y_top - NP_BOTTOM_GAP
+                    break
+        else:
+            y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
+        points.append((y_pdf, y_top))
+        cuts.extend([y_top, y_bot])
+
+    def _np_calibration(self, page_idx):
+        """Gibt den mittleren Zeilenabstand dy der Nullzeilen zurück, oder None."""
+        points = self._np_points.get(page_idx, [])
+        if len(points) < 2:
+            return None
+        dys = [points[i+1][0] - points[i][0] for i in range(len(points)-1)]
+        dy = sum(dys) / len(dys)
+        if dy <= 0:
+            return None
+        return dy
+
+    def np_fill_page(self):
+        """Füllt die aktuelle Seite mit NPs basierend auf dem Abstand der letzten zwei NPs."""
+        if self.doc is None:
+            return
+        dy = self._np_calibration(self.page_index)
+        if dy is None:
+            messagebox.showinfo("Anker füllen",
+                                 "Mindestens 2 Anker setzen, um den Zeilenabstand zu berechnen.")
+            self.status.config(text="Mindestens 2 Anker nötig zum Füllen.")
+            return
+        points = self._np_points[self.page_index]
+        y_last, _ = points[-1]
+        page_height = self.doc[self.page_index].rect.height
+        added = 0
+        y_next = y_last + dy
+        while y_next < page_height - NP_MARGIN_TOP:
+            self._add_np_to_page(self.page_index, y_next)
+            y_next += dy
+            added += 1
+        self._draw_lines()
+        self.status.config(text=f"{added} Anker ergänzt.")
+
+    def np_fill_all_pages(self):
+        """Füllt alle Seiten ohne NPs anhand der Kalibrierung der aktuellen Seite."""
+        if self.doc is None:
+            return
+        dy = self._np_calibration(self.page_index)
+        if dy is None:
+            messagebox.showinfo("Anker füllen",
+                                 "Mindestens 2 Anker auf der aktuellen Seite setzen, um den Zeilenabstand zu berechnen.")
+            self.status.config(text="Mindestens 2 Anker auf aktueller Seite nötig.")
+            return
+        src_points = self._np_points[self.page_index]
+        y_start = src_points[0][0]
+        filled = 0
+        for page_idx in range(self.page_count):
+            if self._np_points.get(page_idx):
+                continue   # bereits NPs vorhanden
+            page = self.doc[page_idx]
+            page_h = page.rect.height
+            y_cur = y_start
+            while y_cur < page_h - NP_MARGIN_TOP:
+                self._add_np_to_page(page_idx, y_cur)
+                y_cur += dy
+            filled += 1
+        self._draw_lines()
+        self.status.config(text=f"{filled} Seite(n) mit NPs gefüllt.")
 
     def on_drag(self, event):
+        x_canvas = self.canvas.canvasx(event.x)
+        y_canvas = self.canvas.canvasy(event.y)
+        if self._drag_np_index is not None and self.doc is not None:
+            # Snap während Drag neu berechnen (on_mouse_move feuert bei B1-Motion nicht)
+            self._snap_y = self._snap_to_staff(NP_SCAN_X, y_canvas)
+            self._drag_np(self._drag_np_index, y_canvas)
+            return
         if self._drag_line_index is None or self.doc is None:
             return
-        y_canvas = self.canvas.canvasy(event.y)
         y_pdf = self._canvas_to_pdf_y(y_canvas)
         page_height = self.doc[self.page_index].rect.height
         y_pdf = max(0, min(y_pdf, page_height))
         self.cuts_per_page[self.page_index][self._drag_line_index] = y_pdf
+        # Doppelkante ohne Shift: Zwilling exakt mitziehen (nicht trennen)
+        if self._drag_line_sibling is not None:
+            self.cuts_per_page[self.page_index][self._drag_line_sibling] = y_pdf
+        # NP-Oberkante: Offset zu allen folgenden auto-NPs propagieren
+        if self._drag_np_top_idx is not None:
+            self._propagate_np_top(self._drag_np_top_idx, y_pdf)
+        # NP-Untergrenze: delta zu allen folgenden auto-Untergrenzen propagieren
+        if self._drag_np_bot_idx is not None:
+            self._propagate_np_bot(self._drag_np_bot_idx, y_pdf)
         self._draw_lines()
 
     def on_mouse_up(self, event):
         self._drag_line_index = None
+        self._drag_np_index = None
+        self._shift_lock_idx = None
+        self._drag_line_sibling = None
+        self.canvas.delete("snap_indicator")
+        if self._drag_np_top_idx is not None:
+            self._np_manual.add((self.page_index, self._drag_np_top_idx))
+            self._drag_np_top_idx = None
+        if self._drag_np_bot_idx is not None:
+            self._drag_np_bot_idx = None
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
         self._update_cursor(x_canvas, y_canvas)
@@ -774,11 +1638,34 @@ class StripApp:
         y_canvas = self.canvas.canvasy(event.y)
         page_height = self.doc[self.page_index].rect.height
 
-        # 1. Nähe zu einer horizontalen Schnittlinie → löschen
+        # 0. NP-Zone: Rechtsklick auf Nullzeilen-Marker → Nullzeile entfernen
+        if self._is_np_zone(x_canvas):
+            points = self._np_points.get(self.page_index, [])
+            for i, (yp, _) in enumerate(points):
+                if abs(yp * self.scale - y_canvas) <= DRAG_TOLERANCE:
+                    points.pop(i)
+                    self.status.config(text="Anker entfernt (Schnittlinien bleiben).")
+                    self._draw_lines()
+                    return
+            return  # Kein Treffer: kein Standardverhalten in NP-Zone
+
+        # 1. Nähe zu einer horizontalen Schnittlinie → smartes Löschen
         cuts = self.cuts_per_page.get(self.page_index, [])
-        for i, y_pdf in enumerate(cuts):
-            yc = self._pdf_to_canvas_y(y_pdf, page_height)
+        for i, y_pdf_cut in enumerate(cuts):
+            yc = self._pdf_to_canvas_y(y_pdf_cut, page_height)
             if abs(yc - y_canvas) <= DRAG_TOLERANCE:
+                if i % 2 == 0:  # Oberkante (rot)
+                    np_idx = self._find_np_by_top(y_pdf_cut)
+                    if np_idx is not None:
+                        if (self.page_index, np_idx) in self._np_manual:
+                            # Durchgezogen → gestrichelt (Manual-Flag entfernen)
+                            self._np_manual.discard((self.page_index, np_idx))
+                            self._draw_lines()
+                            self.status.config(text="Manuelle Korrektur zurückgesetzt (Anker aktiv).")
+                        else:
+                            # Gestrichelt → NP + Streifen löschen
+                            self._delete_np_and_strip(np_idx)
+                        return
                 cuts.pop(i)
                 self._draw_lines()
                 self.status.config(text="Linie gelöscht.")
@@ -794,8 +1681,11 @@ class StripApp:
                 self.status.config(text="Linker Rand entfernt.")
                 return
 
-        # 3. Sonst: linken Rand an X-Position setzen
-        x_pdf = x_canvas / self.scale
+        # 3. Sonst: linken Rand an X-Position setzen (mit X-Snap) — vorerst deaktiviert
+        if not LEFT_MARGIN_ENABLED:
+            return
+        x_eff = self._snap_x if self._snap_x is not None else x_canvas
+        x_pdf = x_eff / self.scale
         self.left_margin_per_page[self.page_index] = x_pdf
         self._draw_lines()
         self.status.config(text=f"Linker Rand gesetzt: x={x_pdf:.1f} pt")
@@ -820,12 +1710,20 @@ class StripApp:
             if inherited is not None:
                 self.left_margin_per_page[to_page] = inherited
 
+    def _transfer_np_points(self, to_page):
+        """Erbt Nullpunkte: zuerst von to_page-2 (Scan-Seite), sonst von to_page-1."""
+        if to_page not in self._np_points:
+            inherited = self._np_points.get(to_page - 2) or self._np_points.get(to_page - 1)
+            if inherited:
+                self._np_points[to_page] = list(inherited)
+
     def next_page(self):
         if self.doc is None or self.page_index >= self.page_count - 1:
             return
         prev = self.page_index
         self.page_index += 1
         self._transfer_cuts(prev, self.page_index)
+        self._transfer_np_points(self.page_index)
         self._transfer_rotation(self.page_index)
         self._transfer_left_margin(self.page_index)
         self._update_rotation_ui()
@@ -858,13 +1756,17 @@ class StripApp:
     # --------------------------------------------------------- Rotation ------
 
     def _on_rotation_changed(self, _=None):
+        if self._updating_ui:
+            return
         val = round(self._rotation_var.get(), 1)
         self.rotation_per_page[self.page_index] = val
+        self._rotation_manual.add(self.page_index)   # manuell gesetzt → nicht überschreiben
         self.rotation_label.config(text=f"{val:+.1f}°" if val != 0 else "0.0°")
         self.render_page()
 
     def reset_rotation(self):
         self.rotation_per_page[self.page_index] = 0.0
+        self._rotation_manual.discard(self.page_index)
         self._rotation_var.set(0.0)
         self.rotation_label.config(text="0.0°")
         self.render_page()
@@ -873,13 +1775,17 @@ class StripApp:
         cur = self.rotation_per_page.get(self.page_index, 0.0)
         new_val = round(max(-10.0, min(10.0, cur + delta)), 1)
         self.rotation_per_page[self.page_index] = new_val
+        self._rotation_manual.add(self.page_index)
         self._rotation_var.set(new_val)
         self._on_rotation_changed()
 
     def _update_rotation_ui(self):
+        # command kurz abkoppeln damit set() kein _on_rotation_changed triggert
+        self.rotation_slider.configure(command='')
         val = self.rotation_per_page.get(self.page_index, 0.0)
         self._rotation_var.set(val)
         self.rotation_label.config(text=f"{val:+.1f}°" if val != 0 else "0.0°")
+        self.rotation_slider.configure(command=self._on_rotation_changed)
 
     def on_mousewheel(self, event):
         # Ctrl + Mausrad = Zoom
@@ -917,12 +1823,15 @@ class StripApp:
     def clear_lines(self):
         self.cuts_per_page[self.page_index] = []
         self.takt_per_page[self.page_index] = []
+        self._np_points[self.page_index] = []
+        self._np_manual = {(p, k) for p, k in self._np_manual if p != self.page_index}
+        self._np_manual_bot = {(p, k) for p, k in self._np_manual_bot if p != self.page_index}
         self.takt_manual = {(p, l) for p, l in self.takt_manual
                             if p != self.page_index}
         self.pagebreak_set = {(p, l) for p, l in self.pagebreak_set
                               if p != self.page_index}
         self._draw_lines()
-        self.status.config(text="Alle Linien dieser Seite gelöscht.")
+        self.status.config(text="Alle Linien und Anker dieser Seite gelöscht.")
 
     # -------------------------------------------------------- PDF-Export ----
 
