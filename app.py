@@ -104,6 +104,7 @@ class StripApp:
         self._drag_start_y = None
         self._shift_lock_idx: int | None = None  # Shift-Lock: fixiertes Linien-Ziel
         self._drag_line_sibling: int | None = None  # Doppelkante: mitgezogener Zwilling
+        self._drag_margin_side: str | None = None  # X-Modus: "left"/"right" wird gerade gezogen
 
         # Taktzahl-Klick-Flag (verhindert Doppel-Event canvas + tag)
         self._takt_click_handled = False
@@ -141,8 +142,11 @@ class StripApp:
 
         pad = dict(padx=20, pady=4)
 
-        tk.Label(win, text="zebrastreifen", font=("Helvetica", 18, "bold")).pack(pady=(20, 2))
-        tk.Label(win, text="Chor-Streifen aus Noten-PDFs extrahieren",
+        title_row = tk.Frame(win)
+        title_row.pack(pady=(20, 2))
+        tk.Label(title_row, text="🦓", font=("Segoe UI Emoji", 18)).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(title_row, text="zebrastreifen", font=("Helvetica", 18, "bold")).pack(side=tk.LEFT)
+        tk.Label(win, text="Streifen aus Noten extrahieren",
                  font=("Helvetica", 10)).pack(**pad)
         tk.Frame(win, height=1, bg="#ccc").pack(fill=tk.X, padx=20, pady=10)
 
@@ -219,7 +223,7 @@ class StripApp:
                          anchor=tk.W).grid(row=row, column=1, sticky=tk.W)
 
         tk.Frame(win, height=1, bg="#ccc").pack(fill=tk.X, padx=20, pady=10)
-        tk.Label(win, text="Version 0.2 (Alpha)  ·  © 2026 zebrastreifen  ·  MIT-Lizenz",
+        tk.Label(win, text="Version 0.2 (Alpha)  ·  © 2026 zebrastreifen / Peter Freitag  ·  MIT-Lizenz",
                  font=("Helvetica", 8), fg="#888").pack(pady=(0, 16))
         tk.Button(win, text="Schliessen", command=win.destroy).pack(pady=(0, 16))
 
@@ -321,16 +325,34 @@ class StripApp:
         self.canvas.bind("<Button-4>", self.on_mousewheel)            # Linux scroll up
         self.canvas.bind("<Button-5>", self.on_mousewheel)            # Linux scroll down
 
-        # Tooltips für die Zonen-Beschriftungen (Anker/Schnitte). Manuelle
-        # Bereichsprüfung in on_mouse_move statt tag_bind Enter/Leave, da der
-        # NP-Zone-Hover laufend Canvas-Elemente neu zeichnet und das die
-        # Enter/Leave-Erkennung von Tag-Events unzuverlässig macht.
+        # Zonen-Labels (Anker/Schnitte/Rand): echte Tk-Widgets statt
+        # Canvas-Items, per .place() im sichtbaren Fenster fixiert
+        # ("floating") — bleiben beim Scrollen sichtbar, statt mit dem
+        # Seiteninhalt aus dem Bild zu wandern. Klick/Hover nutzen dadurch
+        # normale Widget-Events, kein Bbox-Abgleich mehr nötig.
         self._tooltip_win = None
-        self._anker_hint_bbox = None
-        self._schnitte_hint_bbox = None
-        self._rand_links_hint_bbox = None
-        self._rand_rechts_hint_bbox = None
-        self._hint_shown = None
+        zone_font = ("Helvetica", 9, "bold")
+        _lbl_kwargs = dict(font=zone_font, padx=4, pady=1, cursor="hand2",
+                          highlightthickness=1, bd=0)
+        self._anker_label = tk.Label(self.canvas, text="← Anker", **_lbl_kwargs)
+        self._schnitte_label = tk.Label(self.canvas, text="Schnitte →", **_lbl_kwargs)
+        self._rand_links_label = tk.Label(self.canvas, text="Rand ▶", **_lbl_kwargs)
+        self._rand_rechts_label = tk.Label(self.canvas, text="◀ Rand", **_lbl_kwargs)
+        _zone_tooltips = (
+            (self._anker_label, "Anker", "Auf der linken Seite setzt Du einen Anker auf die "
+                                         "oberste Notenlinie pro System."),
+            (self._schnitte_label, "Schnitte", "Auf der rechten Seite definierst Du die Schnitte mit "
+                                               "Klick (Ober- und Unterkanten) und mit Ctrl+Klick "
+                                               "kombinierte Kanten."),
+            (self._rand_links_label, "Rand", "Auf der linken Seite setzt Du den linken Rand für "
+                                             "die ganze Seite."),
+            (self._rand_rechts_label, "Rand", "Auf der rechten Seite setzt Du den rechten Rand für "
+                                              "die ganze Seite."),
+        )
+        for lbl, title, body in _zone_tooltips:
+            lbl.bind("<Button-1>", self._toggle_mode)
+            lbl.bind("<Enter>", lambda e, t=title, b=body: self._show_tooltip(e, t, b))
+            lbl.bind("<Leave>", lambda e: self._hide_tooltip())
 
         # Tastaturshortcuts
         self.root.bind("<Right>", lambda e: self.next_page())
@@ -421,46 +443,10 @@ class StripApp:
         self.page_label.config(text=f"Seite {self.page_index + 1} / {self.page_count}")
         self._draw_lines()
 
-    def _zone_hint_at(self, x_canvas, y_canvas):
-        """Gibt zurück, über welchem Zonen-Label (falls überhaupt) sich
-        x_canvas/y_canvas befindet: 'anker', 'schnitte', 'rand_links',
-        'rand_rechts' oder None. Von Tooltip UND Klick-Umschaltung genutzt."""
-        def inside(bbox):
-            return bbox is not None and bbox[0] <= x_canvas <= bbox[2] and bbox[1] <= y_canvas <= bbox[3]
-
-        if inside(self._anker_hint_bbox):
-            return "anker"
-        if inside(self._schnitte_hint_bbox):
-            return "schnitte"
-        if inside(self._rand_links_hint_bbox):
-            return "rand_links"
-        if inside(self._rand_rechts_hint_bbox):
-            return "rand_rechts"
-        return None
-
-    def _update_zone_tooltip(self, event, x_canvas, y_canvas):
-        """Zeigt/versteckt den Zonen-Tooltip je nach Cursor-Position.
-        Manuelle Bereichsprüfung statt tag_bind Enter/Leave, siehe __init__."""
-        hint = self._zone_hint_at(x_canvas, y_canvas)
-        if hint == self._hint_shown:
-            return
-        self._hint_shown = hint
-        if hint is None:
-            self._hide_tooltip()
-            return
-        if hint == "anker":
-            self._show_tooltip(event, "Anker", "Auf der linken Seite setzt Du einen Anker auf die "
-                                               "oberste Notenlinie pro System.")
-        elif hint == "schnitte":
-            self._show_tooltip(event, "Schnitte", "Auf der rechten Seite definierst Du die Schnitte mit "
-                                                  "Klick (Ober- und Unterkanten) und mit Ctrl+Klick "
-                                                  "kombinierte Kanten.")
-        elif hint == "rand_links":
-            self._show_tooltip(event, "Rand", "Auf der linken Seite setzt Du den linken Rand für "
-                                              "die ganze Seite.")
-        elif hint == "rand_rechts":
-            self._show_tooltip(event, "Rand", "Auf der rechten Seite setzt Du den rechten Rand für "
-                                              "die ganze Seite.")
+    def _toggle_mode(self, event=None):
+        self._x_mode = not self._x_mode
+        self._hide_tooltip()
+        self._draw_lines()
 
     def _show_tooltip(self, event, title, body):
         self._hide_tooltip()
@@ -570,6 +556,12 @@ class StripApp:
                                 dash=(6, 4), tags="line")
         self.canvas.create_line(right_x, 0, right_x, h, fill="#3399ff", width=2,
                                 dash=(6, 4), tags="line")
+        # Oben/unten schliessen den Rand-Rahmen, macht den Modus auf einen
+        # Blick erkennbar (statt nur zwei einzelne senkrechte Linien)
+        self.canvas.create_line(left_x, 0, right_x, 0, fill="#3399ff", width=2,
+                                dash=(6, 4), tags="line")
+        self.canvas.create_line(left_x, h, right_x, h, fill="#3399ff", width=2,
+                                dash=(6, 4), tags="line")
 
     def _draw_strips(self):
         """Graut alle Bereiche aus, die NICHT behalten werden (Negativ-Darstellung)."""
@@ -591,11 +583,6 @@ class StripApp:
 
         # Offene Oberkante (ungerader letzter Klick)
         open_top = cuts[-1] if len(cuts) % 2 == 1 else None
-
-        if not complete_pairs and open_top is None:
-            # Noch gar nichts: alles grau
-            gray_rect(0, h)
-            return
 
         # Alle "freien" Bereiche (Streifen + offener Anfang) in eine sortierte Liste
         # Jeder Eintrag: (y_start, y_end) in Canvas-Koordinaten — clear (nicht grau)
@@ -623,6 +610,17 @@ class StripApp:
             self.canvas.create_line(x_canvas, 0, x_canvas, h,
                                     fill="#3399ff", width=2, dash=(6, 4),
                                     tags=("line", "left_margin"))
+
+        # Rechter Rand: vertikaler grauer Bereich + blaue Linie (analog links)
+        right_x_pdf = self.right_margin_per_page.get(self.page_index)
+        if right_x_pdf is not None:
+            x_canvas = right_x_pdf * self.scale
+            self.canvas.create_rectangle(x_canvas, 0, w, h,
+                                         fill="#335599", stipple="gray50",
+                                         outline="", tags="line")
+            self.canvas.create_line(x_canvas, 0, x_canvas, h,
+                                    fill="#3399ff", width=2, dash=(6, 4),
+                                    tags=("line", "right_margin"))
 
     # ------------------------------------------------- Nullpunkte ------------
 
@@ -716,38 +714,29 @@ class StripApp:
         self._draw_lines()
 
     def _draw_zone_labels(self, page_height):
-        """Zeichnet die Zonen-Labels (Anker/Schnitte bzw. Rand) — dienen als
-        Erklärung UND als Klickfläche zum Umschalten zwischen Y- und
-        X-Modus (Bbox-Prüfung siehe _update_zone_tooltip/on_mouse_down)."""
+        """Positioniert/färbt die vier floatenden Zonen-Labels (echte
+        Tk-Widgets, siehe _build_ui) passend zur Seitenbreite und zum
+        aktiven Modus. Per .place() auf dem Canvas-Widget selbst platziert
+        → bleiben beim Scrollen im sichtbaren Fenster fix ("floating")."""
         page_w = self.doc[self.page_index].rect.width * self.scale
         x_zone = page_w * NP_ZONE_FRAC
-        zone_font = ("Helvetica", 9, "bold")
 
-        def chip(text, x, anchor, active, text_fill, bg_fill, outline, attr):
-            fill = text_fill if active else "#999999"
-            item = self.canvas.create_text(x, 14, text=text, fill=fill,
-                                           anchor=anchor, font=zone_font, tags="line")
-            bbox = self.canvas.bbox(item)
-            pad_bbox = (bbox[0] - 4, bbox[1] - 2, bbox[2] + 4, bbox[3] + 2)
-            # Inaktiv: gestippelt statt voll deckend, damit der Hintergrund
-            # (dunkel im Y-Modus, hell im X-Modus) durchscheint statt eines
-            # dunklen "Lochs".
-            rect_kwargs = dict(fill=bg_fill, outline=outline if active else "#999999", tags="line")
-            if not active:
-                rect_kwargs["stipple"] = "gray25"
-            self.canvas.create_rectangle(*pad_bbox, **rect_kwargs)
-            self.canvas.tag_raise(item)
-            setattr(self, attr, pad_bbox)
+        def style(lbl, active, fg, bg, border):
+            if active:
+                lbl.config(fg=fg, bg=bg, highlightbackground=border)
+            else:
+                lbl.config(fg="#888888", bg="#cccccc", highlightbackground="#999999")
 
         y_active = not self._x_mode
-        chip("← Anker", x_zone - 10, tk.E, y_active,
-            "#eafff2", "#1a3a2a", "#00bb44", "_anker_hint_bbox")
-        chip("Schnitte →", x_zone + 10, tk.W, y_active,
-            "#eafff2", "#1a3a2a", "#00bb44", "_schnitte_hint_bbox")
-        chip("Rand ▶", 10, tk.W, self._x_mode,
-            "#eaf4ff", "#1a2a3a", "#3399ff", "_rand_links_hint_bbox")
-        chip("◀ Rand", page_w - 10, tk.E, self._x_mode,
-            "#eaf4ff", "#1a2a3a", "#3399ff", "_rand_rechts_hint_bbox")
+        style(self._anker_label, y_active, "#eafff2", "#1a3a2a", "#00bb44")
+        style(self._schnitte_label, y_active, "#eafff2", "#1a3a2a", "#00bb44")
+        style(self._rand_links_label, self._x_mode, "#eaf4ff", "#1a2a3a", "#3399ff")
+        style(self._rand_rechts_label, self._x_mode, "#eaf4ff", "#1a2a3a", "#3399ff")
+
+        self._anker_label.place(x=x_zone - 4, y=8, anchor=tk.NE)
+        self._schnitte_label.place(x=x_zone + 4, y=8, anchor=tk.NW)
+        self._rand_links_label.place(x=4, y=8, anchor=tk.NW)
+        self._rand_rechts_label.place(x=page_w - 4, y=8, anchor=tk.NE)
 
     def _draw_np_markers(self, page_height):
         """Zeichnet NP-Zonengrenze und Nullzeilen-Marker (horizontale Linie)."""
@@ -1400,11 +1389,6 @@ class StripApp:
     def on_mouse_move(self, event):
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
-        self._update_zone_tooltip(event, x_canvas, y_canvas)
-
-        if self.doc is not None and self._zone_hint_at(x_canvas, y_canvas) is not None:
-            self.canvas.config(cursor="hand2")
-            return
 
         if self._x_mode:
             # X-Modus: Rand-Vorschau überall (Snap auf senkrechte Linien)
@@ -1465,16 +1449,22 @@ class StripApp:
         y_canvas = self.canvas.canvasy(event.y)
         x_canvas = self.canvas.canvasx(event.x)
 
-        # Zonen-Label angeklickt: Y/X-Modus umschalten (Vorrang vor allem anderen)
-        if self._zone_hint_at(x_canvas, y_canvas) is not None:
-            self._x_mode = not self._x_mode
-            self._hint_shown = None
-            self._hide_tooltip()
-            self._draw_lines()
-            return
-
         if self._x_mode:
-            # X-Modus: Klick setzt linken oder rechten Rand für die ganze Seite
+            # X-Modus: bestehende Randlinie direkt anfassen → stufenlos ohne
+            # Snap ziehen (einzige Möglichkeit für sehr kleine Ränder, da der
+            # Klick-Snap immer zur nächsten erkannten Linie zieht)
+            left_x_pdf = self.left_margin_per_page.get(self.page_index)
+            right_x_pdf = self.right_margin_per_page.get(self.page_index)
+            if left_x_pdf is not None and abs(left_x_pdf * self.scale - x_canvas) <= DRAG_TOLERANCE:
+                self._drag_margin_side = "left"
+                self.canvas.config(cursor="sb_h_double_arrow")
+                return
+            if right_x_pdf is not None and abs(right_x_pdf * self.scale - x_canvas) <= DRAG_TOLERANCE:
+                self._drag_margin_side = "right"
+                self.canvas.config(cursor="sb_h_double_arrow")
+                return
+
+            # Kein Treffer auf bestehende Linie: Klick setzt Rand neu (mit Snap)
             page_w_canvas = self.doc[self.page_index].rect.width * self.scale
             x_eff = self._snap_x if self._snap_x is not None else x_canvas
             x_pdf = x_eff / self.scale
@@ -1722,6 +1712,15 @@ class StripApp:
     def on_drag(self, event):
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
+        if self._drag_margin_side is not None and self.doc is not None:
+            # Stufenlos ohne Snap (Grund: siehe on_mouse_down X-Modus-Zweig)
+            x_pdf = x_canvas / self.scale
+            if self._drag_margin_side == "left":
+                self.left_margin_per_page[self.page_index] = x_pdf
+            else:
+                self.right_margin_per_page[self.page_index] = x_pdf
+            self._draw_lines()
+            return
         if self._drag_np_index is not None and self.doc is not None:
             # Snap während Drag neu berechnen (on_mouse_move feuert bei B1-Motion nicht)
             self._snap_y = self._snap_to_staff(NP_SCAN_X, y_canvas)
@@ -1749,6 +1748,7 @@ class StripApp:
         self._drag_np_index = None
         self._shift_lock_idx = None
         self._drag_line_sibling = None
+        self._drag_margin_side = None
         self.canvas.delete("snap_indicator")
         if self._drag_np_top_idx is not None:
             self._np_manual.add((self.page_index, self._drag_np_top_idx))

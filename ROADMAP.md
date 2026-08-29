@@ -1,6 +1,10 @@
 # Roadmap / Notizen
 
-Stand: 2026-08-29, Branch `feature/nullzeile`
+Stand: 2026-08-29, Branch `master`
+
+## TODO
+
+- **Einfaches Undo (Ctrl+Z)** — noch nicht angegangen, bewusst zurückgestellt.
 
 ## Aufräumen (bekannte Leichen / Konflikte)
 
