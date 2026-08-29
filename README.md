@@ -8,14 +8,18 @@ Ausdruck.
 
 ### Windows
 
-**Aus Quellcode (empfohlen, keine vorgefertigte .exe im Repo):**
+**Fertige .exe** (empfohlen, kein Python nötig): neueste Version von der
+[Releases-Seite](https://github.com/fuge539/zebrastreifen/releases/latest)
+herunterladen und starten.
+
+**Aus Quellcode** (falls lieber ohne Download einer fremden .exe):
 
 ```
 pip install pymupdf pillow
 python app.py
 ```
 
-**Eigene .exe bauen** (optional, für Weitergabe ohne Python-Installation):
+**Eigene .exe bauen**:
 
 ```
 pip install pyinstaller pymupdf pillow
@@ -41,10 +45,10 @@ ist aber plattformunabhängig und läuft direkt mit obigem Befehl.
 
 Die Seite ist in zwei Bereiche geteilt:
 
-- **Linke Seite — Anker**: Klick auf eine Notenzeile setzt automatisch
-  einen Streifen (Ober- + Unterkante).
 - **Rechte Seite — Schnitte**: Streifen manuell setzen/verschieben,
   Ctrl+Klick verbindet zwei Streifen nahtlos.
+- **Linke Seite — Anker**: Klick auf eine Notenzeile setzt automatisch
+  einen Streifen (Ober- + Unterkante).
 
 Ganz oben lässt sich per Klick auf die Labels in den **X-Modus**
 umschalten, um links/rechts den Seitenrand für die ganze Seite zu
