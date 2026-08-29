@@ -82,6 +82,11 @@ Rechtsklick-Problem oben.
 Nicht blockierend für den Nullzeile-Umbau — eigenständiges späteres
 Feature.
 
+**Visuelles Detail (bestätigt):** Die "← Anker"/"Schnitte →"-Labels an der
+Zonengrenze (aktuell im Y-Modus) sollen im X-Modus zugunsten von
+Seitenrand-Markern verschwinden — Darstellung wie bei
+Textverarbeitungs-Linealen: ▶ / ◀ als Rand-Indikatoren statt Textlabels.
+
 ## Später: weitere Ideen
 
 - **Überlappende Streifen sind bereits heute technisch möglich** (die

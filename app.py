@@ -6,11 +6,11 @@ Bedienung:
   - Linien sind per Drag & Drop verschiebbar
   - Rechtsklick löscht eine Linie
 
-  Nullzeilen-Modus (linke 50 % der Seite = Nullzeilen-Zone):
+  Anker-Modus (linke 50 % der Seite = Anker-Zone):
   - Hover → Y snapt auf nächste Notenlinie (blauer Strich)
-  - Klick → Nullzeile + Streifen werden sofort automatisch erzeugt
-  - Drag auf Nullzeilen-Marker → Nullzeile nachträglich vertikal verschieben
-  - Rechtsklick auf Nullzeilen-Marker → Nullzeile entfernen
+  - Klick → Anker + Streifen werden sofort automatisch erzeugt
+  - Drag auf Anker → Anker nachträglich vertikal verschieben
+  - Rechtsklick auf Anker → Anker entfernen
 
   - "Weiter" geht zur nächsten Seite (Schnitte werden übertragen)
   - "PDF exportieren" erzeugt das Ausgabe-PDF
@@ -156,12 +156,12 @@ class StripApp:
             ("Rechtsklick",     "Linie löschen"),
             ("Delete / ←",      "Letzte Linie entfernen"),
             ("",                ""),
-            ("Nullzeilen (linke Seite)", ""),
+            ("Anker (linke Seite)", ""),
             ("Hover",            "Y snapt auf Notenlinie (blauer Strich)"),
-            ("Klick",            "Nullzeile + Streifen sofort erzeugen"),
-            ("Drag Marker",      "Bestehende Nullzeile vertikal verschieben"),
-            ("Rechtsklick Marker", "Nullzeile entfernen"),
-            ("⟳ Nullzeilen füllen", "Seite füllen (≥2 Nullzeilen nötig)"),
+            ("Klick",            "Anker + Streifen sofort erzeugen"),
+            ("Drag",              "Bestehenden Anker vertikal verschieben"),
+            ("Rechtsklick",       "Anker entfernen"),
+            ("⟳ Anker füllen",  "Seite füllen (≥2 Anker nötig)"),
             ("⟳ Alle Seiten",  "Alle leeren Seiten füllen"),
             ("",                ""),
             ("Taktzahlen",      ""),
@@ -247,7 +247,7 @@ class StripApp:
         self.page_label.pack(side=tk.LEFT, padx=8)
         tk.Button(toolbar, text="Letzte Linie entfernen", command=self.remove_last_line).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Button(toolbar, text="Seite leeren", command=self.clear_lines).pack(side=tk.LEFT, padx=4, pady=2)
-        tk.Button(toolbar, text="⟳ Nullzeilen füllen", command=self.np_fill_page).pack(side=tk.LEFT, padx=4, pady=2)
+        tk.Button(toolbar, text="⟳ Anker füllen", command=self.np_fill_page).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Button(toolbar, text="⟳ Alle Seiten", command=self.np_fill_all_pages).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Label(toolbar, text="  Zoom:").pack(side=tk.LEFT)
         tk.Button(toolbar, text="−", width=2, command=self.zoom_out).pack(side=tk.LEFT, padx=2, pady=2)
@@ -306,6 +306,15 @@ class StripApp:
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)          # Windows
         self.canvas.bind("<Button-4>", self.on_mousewheel)            # Linux scroll up
         self.canvas.bind("<Button-5>", self.on_mousewheel)            # Linux scroll down
+
+        # Tooltips für die Zonen-Beschriftungen (Anker/Schnitte). Manuelle
+        # Bereichsprüfung in on_mouse_move statt tag_bind Enter/Leave, da der
+        # NP-Zone-Hover laufend Canvas-Elemente neu zeichnet und das die
+        # Enter/Leave-Erkennung von Tag-Events unzuverlässig macht.
+        self._tooltip_win = None
+        self._anker_hint_bbox = None
+        self._schnitte_hint_bbox = None
+        self._hint_shown = None
 
         # Tastaturshortcuts
         self.root.bind("<Right>", lambda e: self.next_page())
@@ -394,6 +403,51 @@ class StripApp:
 
         self.page_label.config(text=f"Seite {self.page_index + 1} / {self.page_count}")
         self._draw_lines()
+
+    def _update_zone_tooltip(self, event, x_canvas, y_canvas):
+        """Zeigt/versteckt den Anker/Schnitte-Tooltip je nach Cursor-Position.
+        Manuelle Bereichsprüfung statt tag_bind Enter/Leave, siehe __init__."""
+        def inside(bbox):
+            return bbox is not None and bbox[0] <= x_canvas <= bbox[2] and bbox[1] <= y_canvas <= bbox[3]
+
+        if inside(self._anker_hint_bbox):
+            hint = "anker"
+        elif inside(self._schnitte_hint_bbox):
+            hint = "schnitte"
+        else:
+            hint = None
+
+        if hint == self._hint_shown:
+            return
+        self._hint_shown = hint
+        if hint == "anker":
+            self._show_tooltip(event, "Anker", "Auf der linken Seite setzt Du einen Anker auf die "
+                                               "oberste Notenlinie pro System.")
+        elif hint == "schnitte":
+            self._show_tooltip(event, "Schnitte", "Auf der rechten Seite definierst Du die Schnitte mit "
+                                                  "Klick (Ober- und Unterkanten) und mit Ctrl+Klick "
+                                                  "kombinierte Kanten.")
+        else:
+            self._hide_tooltip()
+
+    def _show_tooltip(self, event, title, body):
+        self._hide_tooltip()
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+        frame = tk.Frame(win, bg="#222222", bd=1, relief=tk.SOLID)
+        frame.pack()
+        tk.Label(frame, text=title, bg="#222222", fg="#ffffff",
+                font=("Helvetica", 9, "bold"), anchor="w").pack(fill=tk.X, padx=6, pady=(4, 0))
+        tk.Label(frame, text=body, bg="#222222", fg="#dddddd",
+                font=("Helvetica", 9), wraplength=260, justify=tk.LEFT).pack(padx=6, pady=(0, 4))
+        self._tooltip_win = win
+
+    def _hide_tooltip(self):
+        if self._tooltip_win is not None:
+            self._tooltip_win.destroy()
+            self._tooltip_win = None
 
     def _draw_lines(self):
         """Zeichnet alle Schnittlinien der aktuellen Seite."""
@@ -591,7 +645,7 @@ class StripApp:
 
         n = len(points)
         self.status.config(
-            text=f"Nullzeile {insert_pos + 1}/{n} gesetzt (y={y_pdf:.0f} pt)")
+            text=f"Anker {insert_pos + 1}/{n} gesetzt (y={y_pdf:.0f} pt)")
         self._draw_lines()
 
     def _draw_np_markers(self, page_height):
@@ -602,6 +656,16 @@ class StripApp:
         self.canvas.create_line(x_zone, 0, x_zone, h,
                                 fill="#00bb44", width=1, dash=(1, 3),
                                 tags="line")
+        zone_font = ("Helvetica", 9, "bold")
+        for text, x, anchor, attr in (("← Anker", x_zone - 10, tk.E, "_anker_hint_bbox"),
+                                      ("Schnitte →", x_zone + 10, tk.W, "_schnitte_hint_bbox")):
+            item = self.canvas.create_text(x, 14, text=text, fill="#eafff2",
+                                           anchor=anchor, font=zone_font, tags="line")
+            bbox = self.canvas.bbox(item)
+            pad_bbox = (bbox[0] - 4, bbox[1] - 2, bbox[2] + 4, bbox[3] + 2)
+            self.canvas.create_rectangle(*pad_bbox, fill="#1a3a2a", outline="#00bb44", tags="line")
+            self.canvas.tag_raise(item)
+            setattr(self, attr, pad_bbox)
         for y_pdf, _ in self._np_points.get(self.page_index, []):
             yc = y_pdf * self.scale
             r = 6
@@ -919,7 +983,7 @@ class StripApp:
                 new_manual.add((p, k - 1))
         self._np_manual = new_manual
         self._draw_lines()
-        self.status.config(text="Nullzeile und Streifen gelöscht.")
+        self.status.config(text="Anker und Streifen gelöscht.")
 
     # ------------------------------------------------- Taktzahlen ------------
 
@@ -1245,6 +1309,7 @@ class StripApp:
     def on_mouse_move(self, event):
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
+        self._update_zone_tooltip(event, x_canvas, y_canvas)
         in_np_zone = self._is_np_zone(x_canvas) and self.doc is not None
         shift_held = bool(event.state & 0x0001)
         # Y-Snap in NP-Zone: eingerastet wenn erkannt, sonst frei schwebend
@@ -1481,9 +1546,9 @@ class StripApp:
             return
         dy = self._np_calibration(self.page_index)
         if dy is None:
-            messagebox.showinfo("Nullzeile füllen",
-                                 "Mindestens 2 Nullzeilen setzen, um den Zeilenabstand zu berechnen.")
-            self.status.config(text="Mindestens 2 Nullzeilen nötig zum Füllen.")
+            messagebox.showinfo("Anker füllen",
+                                 "Mindestens 2 Anker setzen, um den Zeilenabstand zu berechnen.")
+            self.status.config(text="Mindestens 2 Anker nötig zum Füllen.")
             return
         points = self._np_points[self.page_index]
         y_last, _ = points[-1]
@@ -1495,7 +1560,7 @@ class StripApp:
             y_next += dy
             added += 1
         self._draw_lines()
-        self.status.config(text=f"{added} Nullzeile(n) ergänzt.")
+        self.status.config(text=f"{added} Anker ergänzt.")
 
     def np_fill_all_pages(self):
         """Füllt alle Seiten ohne NPs anhand der Kalibrierung der aktuellen Seite."""
@@ -1503,9 +1568,9 @@ class StripApp:
             return
         dy = self._np_calibration(self.page_index)
         if dy is None:
-            messagebox.showinfo("Nullzeile füllen",
-                                 "Mindestens 2 Nullzeilen auf der aktuellen Seite setzen, um den Zeilenabstand zu berechnen.")
-            self.status.config(text="Mindestens 2 Nullzeilen auf aktueller Seite nötig.")
+            messagebox.showinfo("Anker füllen",
+                                 "Mindestens 2 Anker auf der aktuellen Seite setzen, um den Zeilenabstand zu berechnen.")
+            self.status.config(text="Mindestens 2 Anker auf aktueller Seite nötig.")
             return
         src_points = self._np_points[self.page_index]
         y_start = src_points[0][0]
@@ -1579,7 +1644,7 @@ class StripApp:
             for i, (yp, _) in enumerate(points):
                 if abs(yp * self.scale - y_canvas) <= DRAG_TOLERANCE:
                     points.pop(i)
-                    self.status.config(text="Nullzeile entfernt (Schnittlinien bleiben).")
+                    self.status.config(text="Anker entfernt (Schnittlinien bleiben).")
                     self._draw_lines()
                     return
             return  # Kein Treffer: kein Standardverhalten in NP-Zone
@@ -1596,7 +1661,7 @@ class StripApp:
                             # Durchgezogen → gestrichelt (Manual-Flag entfernen)
                             self._np_manual.discard((self.page_index, np_idx))
                             self._draw_lines()
-                            self.status.config(text="Manuelle Korrektur zurückgesetzt (Nullzeile aktiv).")
+                            self.status.config(text="Manuelle Korrektur zurückgesetzt (Anker aktiv).")
                         else:
                             # Gestrichelt → NP + Streifen löschen
                             self._delete_np_and_strip(np_idx)
@@ -1766,7 +1831,7 @@ class StripApp:
         self.pagebreak_set = {(p, l) for p, l in self.pagebreak_set
                               if p != self.page_index}
         self._draw_lines()
-        self.status.config(text="Alle Linien und Nullzeilen dieser Seite gelöscht.")
+        self.status.config(text="Alle Linien und Anker dieser Seite gelöscht.")
 
     # -------------------------------------------------------- PDF-Export ----
 
