@@ -91,14 +91,37 @@ Feature.
   Akkord/Folgesystem beginnt trotzdem sauber darunter. Ob's optisch
   überzeugt, noch nicht an echtem Notenbild getestet.
 
-- **Shift-Hover-Lock für Linien-Drag im normalen Bereich**: generell
-  relevant (nicht nur bei bewusster Überlappung), weil benachbarte
-  Streifen-Kanten (Unterkante zu nächster Oberkante) fast immer nah
-  beieinander liegen — die reine Nähe-Erkennung (`_find_nearby_line`)
-  wird dann leicht mehrdeutig. Idee: Maus auf eine Linie bewegen, Shift
-  drücken → Ziel wird fixiert, bleibt auch dann diese Linie, wenn man
-  sich beim Ziehen an eine benachbarte Linie annähert oder darüber
-  hinaus bewegt (statt dass die Nähe-Erkennung mittendrin umspringt).
+- ~~Shift-Hover-Lock für Linien-Drag im normalen Bereich~~ **Umgesetzt &
+  getestet.** Shift halten → Ziel wird nicht über Pixel-Nähe bestimmt,
+  sondern über die **Hälfte** des Zwischenraums: die zwei Linien, die
+  den Cursor direkt einschliessen (nächste oberhalb + nächste
+  unterhalb, unabhängig davon zu welchem Streifen sie gehören —
+  funktioniert so auch bei überlappenden Streifen), plus deren
+  Mittelpunkt als Umschaltschwelle. Bleibt gesperrt, auch wenn man sich
+  beim Ziehen über die Schwelle hinaus bewegt. Cursor zeigt Richtung
+  zur gesperrten Linie (↑ Oberkante-Ziel, ↓ Unterkante-Ziel) statt dem
+  generischen ↕. Funktioniert auch bei einer noch dangelnden Oberkante
+  ohne Unterkante. Implementiert in `_find_shift_lock_target`,
+  `on_mouse_move`, `on_mouse_down`.
+
+- ~~"Doppelkante" per Ctrl+Klick im normalen Bereich~~ **Umgesetzt &
+  getestet.** Ctrl+Klick auf leere Fläche → normales Verhalten
+  (Oberkante wie gehabt). Ctrl+Klick, während eine Oberkante auf eine
+  Unterkante wartet → setzt an der Klickposition gleichzeitig die
+  Unterkante des aktuellen Streifens *und* die Oberkante des nächsten,
+  exakt auf derselben Höhe (nahtlos aneinander, keine Lücke;
+  implementiert als zwei Cuts mit identischem Y — kein neues
+  Datenmodell nötig). Eigene Farbe (orange `#e67e22`) statt rot/grün,
+  zwei Labels ("unten N" grün oberhalb, "oben N+1" rot unterhalb).
+  Shift-Lock trennt sie gezielt (obere Hälfte → Unterkante-Rolle,
+  untere Hälfte → Oberkante-Rolle) — dafür musste
+  `_find_shift_lock_target` um einen Koinzidenz-Sonderfall ergänzt
+  werden (zwei Cuts exakt an derselben Stelle wurden vorher immer auf
+  denselben Index aufgelöst, unabhängig von der Cursor-Seite).
+  Spätere, noch vagere Erweiterung: "Prognose" — analog zur
+  Nullzeilen-Füllfunktion weitere Doppelkanten automatisch
+  extrapolieren, basierend auf dem Abstand der ersten gesetzten. Eigener
+  Schritt, nicht Teil des Kern-Features.
 
 - **"Radiergummi" für den Export** — noch vage: vermutlich ein Werkzeug,
   um im Export-Ausschnitt gezielt Bereiche (z.B. ungewollt mit

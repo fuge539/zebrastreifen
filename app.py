@@ -99,6 +99,8 @@ class StripApp:
         # Drag-State
         self._drag_line_index = None
         self._drag_start_y = None
+        self._shift_lock_idx: int | None = None  # Shift-Lock: fixiertes Linien-Ziel
+        self._drag_line_sibling: int | None = None  # Doppelkante: mitgezogener Zwilling
 
         # Taktzahl-Klick-Flag (verhindert Doppel-Event canvas + tag)
         self._takt_click_handled = False
@@ -399,11 +401,28 @@ class StripApp:
         cuts = self.cuts_per_page.get(self.page_index, [])
         page_height = self.doc[self.page_index].rect.height
 
-        for i, y_pdf in enumerate(cuts):
+        w = int(self.doc[self.page_index].rect.width * self.scale)
+        n_cuts = len(cuts)
+        i = 0
+        while i < n_cuts:
+            # Doppelkante: Unterkante (i ungerade) + nächste Oberkante (i+1),
+            # exakt gleiche Höhe -> als eine orange Linie mit 2 Labels zeichnen
+            if i % 2 == 1 and i + 1 < n_cuts and abs(cuts[i] - cuts[i + 1]) < 0.5:
+                y_canvas = self._pdf_to_canvas_y(cuts[i], page_height)
+                self.canvas.create_line(0, y_canvas, w, y_canvas,
+                                        fill="#9b59b6", width=2,
+                                        tags=("line", f"line_{i}", f"line_{i + 1}"))
+                self.canvas.create_text(w - 8, y_canvas - 18, text=f"unten {i // 2 + 1}",
+                                        fill="#2ecc71", anchor=tk.E, tags="line")
+                self.canvas.create_text(w - 8, y_canvas + 6, text=f"oben {i // 2 + 2}",
+                                        fill="#e74c3c", anchor=tk.E, tags="line")
+                i += 2
+                continue
+
+            y_pdf = cuts[i]
             y_canvas = self._pdf_to_canvas_y(y_pdf, page_height)
             color = "#e74c3c" if i % 2 == 0 else "#2ecc71"
             label = "oben" if i % 2 == 0 else "unten"
-            w = int(self.doc[self.page_index].rect.width * self.scale)
             # Gestrichelt = auto (NP), durchgezogen = manuell
             ref_top = cuts[i] if i % 2 == 0 else (cuts[i - 1] if i > 0 else None)
             np_idx = self._find_np_by_top(ref_top) if ref_top is not None else None
@@ -412,8 +431,9 @@ class StripApp:
             self.canvas.create_line(0, y_canvas, w, y_canvas,
                                     fill=color, width=2, dash=dash,
                                     tags=("line", f"line_{i}"))
-            self.canvas.create_text(8, y_canvas - 8, text=f"{label} {i // 2 + 1}",
-                                    fill=color, anchor=tk.W, tags="line")
+            self.canvas.create_text(w - 8, y_canvas - 8, text=f"{label} {i // 2 + 1}",
+                                    fill=color, anchor=tk.E, tags="line")
+            i += 1
 
         # Streifen farbig hinterlegen
         self._draw_strips()
@@ -1147,6 +1167,37 @@ class StripApp:
                 return i
         return None
 
+    def _find_shift_lock_target(self, y_canvas):
+        """Shift-Lock: findet die zwei Linien, die y_canvas einschliessen
+        (unabhängig davon, zu welchem Streifen sie gehören — funktioniert
+        auch bei überlappenden Streifen), und gibt den Index derjenigen
+        zurück, auf deren Seite des Mittelpunkts der Cursor steht.
+        Sonderfall Doppelkante: liegt die nächstgelegene Linie exakt auf
+        einer zweiten (Unterkante+Oberkante an derselben Stelle), entscheidet
+        die Cursor-Seite direkt, welche der beiden gemeint ist."""
+        cuts = self.cuts_per_page.get(self.page_index, [])
+        if not cuts:
+            return None
+        page_height = self.doc[self.page_index].rect.height
+        canvas_ys = [(i, self._pdf_to_canvas_y(y, page_height)) for i, y in enumerate(cuts)]
+
+        nearest_idx, nearest_y = min(canvas_ys, key=lambda t: abs(t[1] - y_canvas))
+        sibling = next((j for j, yj in canvas_ys if j != nearest_idx and abs(yj - nearest_y) < 0.5), None)
+        if sibling is not None:
+            unten_idx, oben_idx = (nearest_idx, sibling) if nearest_idx % 2 == 1 else (sibling, nearest_idx)
+            return unten_idx if y_canvas <= nearest_y else oben_idx
+
+        above = max((t for t in canvas_ys if t[1] <= y_canvas), key=lambda t: t[1], default=None)
+        below = min((t for t in canvas_ys if t[1] >= y_canvas), key=lambda t: t[1], default=None)
+        if above is None:
+            return below[0] if below else None
+        if below is None:
+            return above[0]
+        if above[0] == below[0]:
+            return above[0]
+        midpoint = (above[1] + below[1]) / 2
+        return above[0] if y_canvas < midpoint else below[0]
+
     def _update_cursor(self, x_canvas, y_canvas):
         """Setzt den Cursor je nach Nähe zu einer Linie."""
         if self.doc is None:
@@ -1195,6 +1246,7 @@ class StripApp:
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
         in_np_zone = self._is_np_zone(x_canvas) and self.doc is not None
+        shift_held = bool(event.state & 0x0001)
         # Y-Snap in NP-Zone: eingerastet wenn erkannt, sonst frei schwebend
         if in_np_zone:
             self._snap_y = self._snap_to_staff(NP_SCAN_X, y_canvas)
@@ -1210,7 +1262,23 @@ class StripApp:
         else:
             self._snap_x = None
             self.canvas.delete("snap_x_indicator")
+        # Shift-Lock: Ziel einmalig bestimmen, dann fixiert halten bis Shift
+        # losgelassen wird (nicht bei jeder Mausbewegung neu berechnen)
+        if not in_np_zone and shift_held and self.doc is not None:
+            if self._shift_lock_idx is None:
+                self._shift_lock_idx = self._find_shift_lock_target(y_canvas)
+        else:
+            self._shift_lock_idx = None
         if self._drag_line_index is not None or self._drag_np_index is not None:
+            return
+        if self._shift_lock_idx is not None:
+            # Pfeil zeigt zur gesperrten Linie: nach oben wenn sie über dem
+            # Cursor liegt (Oberkante), nach unten wenn darunter (Unterkante)
+            page_height = self.doc[self.page_index].rect.height
+            locked_y = self._pdf_to_canvas_y(
+                self.cuts_per_page[self.page_index][self._shift_lock_idx], page_height)
+            cursor = "based_arrow_up" if locked_y < y_canvas else "based_arrow_down"
+            self.canvas.config(cursor=cursor)
             return
         self._update_cursor(x_canvas, y_canvas)
 
@@ -1241,12 +1309,22 @@ class StripApp:
             self._add_nullpunkt(locked_y)
             return
 
-        idx = self._find_nearby_line(y_canvas)
+        # Shift-Lock hat Vorrang vor der normalen Nähe-Erkennung
+        using_shift_lock = self._shift_lock_idx is not None
+        idx = self._shift_lock_idx if using_shift_lock else self._find_nearby_line(y_canvas)
         if idx is not None:
             # Drag-Modus: bestehende Linie verschieben
             self._drag_line_index = idx
             self._drag_start_y = y_canvas
             self.canvas.config(cursor="fleur")
+            # Doppelkante ohne Shift: beide Kanten zusammen greifen (nicht trennen).
+            # Mit Shift-Lock bewusst getrennt greifen (siehe _find_shift_lock_target).
+            self._drag_line_sibling = None
+            if not using_shift_lock:
+                cuts_all = self.cuts_per_page.get(self.page_index, [])
+                idx_y = cuts_all[idx]
+                self._drag_line_sibling = next(
+                    (j for j, y in enumerate(cuts_all) if j != idx and abs(y - idx_y) < 0.5), None)
             # Erkennen ob NP-Ober- oder Untergrenze gezogen wird
             self._drag_np_top_idx = None
             self._drag_np_bot_idx = None
@@ -1287,12 +1365,19 @@ class StripApp:
             return
 
         # Neuen Schnitt setzen (grauer Bereich)
-        if self.page_index not in self.cuts_per_page:
-            self.cuts_per_page[self.page_index] = []
-        self.cuts_per_page[self.page_index].append(y_pdf)
-        n = len(self.cuts_per_page[self.page_index])
-        kind = "Oberkante" if n % 2 == 1 else "Unterkante"
-        self.status.config(text=f"Seite {self.page_index + 1}: {kind} Streifen {(n + 1) // 2} gesetzt (y={y_pdf:.1f} pt)")
+        cuts = self.cuts_per_page.setdefault(self.page_index, [])
+        ctrl_held = bool(event.state & 0x0004)
+        if ctrl_held and len(cuts) % 2 == 1:
+            # Doppelkante: Unterkante des offenen Streifens + Oberkante des
+            # nächsten auf derselben Höhe (nahtlos aneinander, keine Lücke)
+            cuts.append(y_pdf)
+            cuts.append(y_pdf)
+            self.status.config(text=f"Seite {self.page_index + 1}: Doppelkante gesetzt (y={y_pdf:.1f} pt)")
+        else:
+            cuts.append(y_pdf)
+            n = len(cuts)
+            kind = "Oberkante" if n % 2 == 1 else "Unterkante"
+            self.status.config(text=f"Seite {self.page_index + 1}: {kind} Streifen {(n + 1) // 2} gesetzt (y={y_pdf:.1f} pt)")
         self._draw_lines()
 
     def _drag_np(self, np_idx, y_canvas):
@@ -1452,6 +1537,9 @@ class StripApp:
         page_height = self.doc[self.page_index].rect.height
         y_pdf = max(0, min(y_pdf, page_height))
         self.cuts_per_page[self.page_index][self._drag_line_index] = y_pdf
+        # Doppelkante ohne Shift: Zwilling exakt mitziehen (nicht trennen)
+        if self._drag_line_sibling is not None:
+            self.cuts_per_page[self.page_index][self._drag_line_sibling] = y_pdf
         # NP-Oberkante: Offset zu allen folgenden auto-NPs propagieren
         if self._drag_np_top_idx is not None:
             self._propagate_np_top(self._drag_np_top_idx, y_pdf)
@@ -1463,6 +1551,8 @@ class StripApp:
     def on_mouse_up(self, event):
         self._drag_line_index = None
         self._drag_np_index = None
+        self._shift_lock_idx = None
+        self._drag_line_sibling = None
         self.canvas.delete("snap_indicator")
         if self._drag_np_top_idx is not None:
             self._np_manual.add((self.page_index, self._drag_np_top_idx))
