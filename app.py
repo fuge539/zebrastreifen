@@ -4,15 +4,13 @@ Bedienung:
   Normalmodus (rechte Seitenhälfte):
   - Linksklick setzt abwechselnd Ober- und Untergrenze eines Streifens
   - Linien sind per Drag & Drop verschiebbar
-  - Rechtsklick löscht eine Linie / setzt linken Rand
+  - Rechtsklick löscht eine Linie
 
-  Nullpunkt-Modus (linke 40 % der Seite = NP-Zone):
+  Nullzeilen-Modus (linke 50 % der Seite = Nullzeilen-Zone):
   - Hover → Y snapt auf nächste Notenlinie (blauer Strich)
-  - Klick → Y sperren, Diamant erscheint
-  - Klick + Drag nach links/rechts → X-Position setzen
-  - Loslassen → Nullpunkt + Streifen werden automatisch erzeugt
-  - Drag auf Diamant → Nullpunkt nachträglich verschieben
-  - Rechtsklick auf Diamant → Nullpunkt entfernen
+  - Klick → Nullzeile + Streifen werden sofort automatisch erzeugt
+  - Drag auf Nullzeilen-Marker → Nullzeile nachträglich vertikal verschieben
+  - Rechtsklick auf Nullzeilen-Marker → Nullzeile entfernen
 
   - "Weiter" geht zur nächsten Seite (Schnitte werden übertragen)
   - "PDF exportieren" erzeugt das Ausgabe-PDF
@@ -39,7 +37,13 @@ A4_H = 841.890          # A4 Höhe in Punkten
 EXPORT_DPI        = 300       # Auflösung für rotierte Streifen
 EXPORT_SCALE      = EXPORT_DPI / 72
 
-NP_ZONE_FRAC  = 0.40          # linke 40 % der Seitenbreite = Nullpunkt-Zone
+# "Linker Rand" (X-Kante) ist vorerst deaktiviert (setzen + anzeigen) — gehört
+# konzeptionell zum geplanten X-Modus (siehe ROADMAP.md), der noch nicht existiert.
+# Bestehende Werte lassen sich weiterhin per Rechtsklick auf die Randlinie löschen.
+LEFT_MARGIN_ENABLED = False
+
+NP_ZONE_FRAC  = 0.50          # linke 50 % der Seitenbreite = Nullzeilen-Klickzone
+NP_SCAN_X     = 0             # fester X-Anker für Notenlinien-Erkennung (unabhängig vom Klick-X in der Zone)
 NP_MARGIN_TOP = 8 * MM        # Abstand oberhalb Nullpunkt (Punkte)
 NP_MARGIN_BOT = 30 * MM       # Abstand unterhalb Nullpunkt (Punkte)
 NP_BOTTOM_GAP = 4 * MM        # Zusätzliche Lücke zwischen Streifen (Untergrenze = nächster NP − 12 mm)
@@ -85,9 +89,7 @@ class StripApp:
         self._photo = None
         self._page_img = None         # PIL-Kopie für Staff-Snap
         self._snap_y: float | None = None       # aktueller Y-Snap (canvas-Koordinaten)
-        self._snap_x: float | None = None       # aktueller X-Snap (canvas-Koordinaten)
-        self._np_placing: bool = False          # NP-Platzierung läuft (Y gesperrt, X per Drag)
-        self._np_placing_y: float | None = None # gesperrtes Y während Platzierung
+        self._snap_x: float | None = None       # aktueller X-Snap (canvas-Koordinaten, linker Rand)
 
         # Pro Seite: Taktzahlen je Streifen (Index = sortierte Streifen-Position)
         self.takt_per_page: dict[int, list[int]] = {}
@@ -110,9 +112,9 @@ class StripApp:
         # Seitenwechsel-Marker: (page_idx, local_idx) → neue Seite erzwingen
         self.pagebreak_set: set[tuple[int, int]] = set()
 
-        # Nullpunkte (Anfang Notensystem): pro Seite Liste von (x_pdf, y_pdf, orig_top)
+        # Nullzeilen (Anfang Notensystem): pro Seite Liste von (y_pdf, orig_top)
         # orig_top = erzeugter top-Schnitt-Wert (dient als Anker beim Drag)
-        self._np_points: dict[int, list[tuple[float, float, float]]] = {}
+        self._np_points: dict[int, list[tuple[float, float]]] = {}
         self._drag_np_index: int | None = None      # NP-Raute wird gezogen
         self._drag_np_top_idx: int | None = None    # NP-Oberkante (rote Linie) wird gezogen
         self._drag_np_bot_idx: int | None = None    # NP-Untergrenze (grüne Linie) wird gezogen
@@ -145,25 +147,20 @@ class StripApp:
             ("E / →",           "Nächste Seite"),
             ("Page Up/Down",    "Vorherige / Nächste Seite"),
             ("",                ""),
-            ("Schnitte",        ""),
+            ("Schnitte (rechte Seite)", ""),
             ("Linksklick",      "Schnittlinie setzen"),
+            ("Klick im Streifen", "Unterkante verschieben"),
             ("Drag",            "Linie verschieben"),
-            ("Rechtsklick",     "Linie löschen / linken Rand setzen"),
+            ("Rechtsklick",     "Linie löschen"),
             ("Delete / ←",      "Letzte Linie entfernen"),
             ("",                ""),
-            ("Nullpunkte (NP)",  ""),
-            ("Hover (NP-Zone)",  "Y snapt auf Notenlinie (blauer Strich)"),
-            ("Klick (NP-Zone)",  "Y sperren → Diamant erscheint"),
-            ("Klick + Drag →",   "X-Position ziehen (snapt auf Senkrechte)"),
-            ("Loslassen",        "Nullpunkt + Streifen bestätigen"),
-            ("Drag ◆",          "Bestehenden Nullpunkt verschieben"),
-            ("Rechtsklick ◆",   "Nullpunkt entfernen"),
-            ("⟳ NP füllen",    "Seite füllen (≥2 NP nötig)"),
+            ("Nullzeilen (linke Seite)", ""),
+            ("Hover",            "Y snapt auf Notenlinie (blauer Strich)"),
+            ("Klick",            "Nullzeile + Streifen sofort erzeugen"),
+            ("Drag Marker",      "Bestehende Nullzeile vertikal verschieben"),
+            ("Rechtsklick Marker", "Nullzeile entfernen"),
+            ("⟳ Nullzeilen füllen", "Seite füllen (≥2 Nullzeilen nötig)"),
             ("⟳ Alle Seiten",  "Alle leeren Seiten füllen"),
-            ("",                ""),
-            ("Streifen-Zonen",   ""),
-            ("↓ Klick (Mitte)",  "Unterkante verschieben"),
-            ("← Klick (links)",  "Linken Rand setzen"),
             ("",                ""),
             ("Taktzahlen",      ""),
             ("Linksklick [N]",  "Taktzahl +1 (propagiert)"),
@@ -248,7 +245,7 @@ class StripApp:
         self.page_label.pack(side=tk.LEFT, padx=8)
         tk.Button(toolbar, text="Letzte Linie entfernen", command=self.remove_last_line).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Button(toolbar, text="Seite leeren", command=self.clear_lines).pack(side=tk.LEFT, padx=4, pady=2)
-        tk.Button(toolbar, text="⟳ NP füllen", command=self.np_fill_page).pack(side=tk.LEFT, padx=4, pady=2)
+        tk.Button(toolbar, text="⟳ Nullzeilen füllen", command=self.np_fill_page).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Button(toolbar, text="⟳ Alle Seiten", command=self.np_fill_all_pages).pack(side=tk.LEFT, padx=4, pady=2)
         tk.Label(toolbar, text="  Zoom:").pack(side=tk.LEFT)
         tk.Button(toolbar, text="−", width=2, command=self.zoom_out).pack(side=tk.LEFT, padx=2, pady=2)
@@ -504,18 +501,16 @@ class StripApp:
         prev_idx = len(points) - 1
         if (self.page_index, prev_idx) in self._np_manual_bot:
             return
-        _, _, prev_orig_top = points[prev_idx]
+        _, prev_orig_top = points[prev_idx]
         cuts = self.cuts_per_page.get(self.page_index, [])
         for j in range(0, len(cuts) - 1, 2):
             if abs(cuts[j] - prev_orig_top) < 1.0:
                 cuts[j + 1] = new_y_top - NP_BOTTOM_GAP
                 break
 
-    def _add_nullpunkt(self, x_canvas, y_canvas):
-        """Setzt einen Nullpunkt sortiert nach Y und erzeugt das zugehörige Streifen-Paar.
-        Y snapt auf erkannte Notenlinie; X wird auf Scan-Offset gesetzt (nach Klammern)."""
-        # Y und X kommen bereits korrekt (Y gesnappt, X per Drag gesetzt)
-        x_pdf = x_canvas / self.scale
+    def _add_nullpunkt(self, y_canvas):
+        """Setzt eine Nullzeile sortiert nach Y und erzeugt das zugehörige Streifen-Paar.
+        Y snapt auf erkannte Notenlinie (bereits gesnappt übergeben)."""
         y_pdf = y_canvas / self.scale
         page_height = self.doc[self.page_index].rect.height
         points = self._np_points.setdefault(self.page_index, [])
@@ -524,18 +519,18 @@ class StripApp:
         y_top = max(0.0, y_pdf - NP_MARGIN_TOP)
 
         # Einfügeposition nach Y bestimmen
-        insert_pos = next((i for i, (_, yp, _) in enumerate(points) if yp > y_pdf),
+        insert_pos = next((i for i, (yp, _) in enumerate(points) if yp > y_pdf),
                           len(points))
         prev = points[insert_pos - 1] if insert_pos > 0 else None
         nxt  = points[insert_pos]     if insert_pos < len(points) else None
 
         # Untergrenze: Abstand zum Vorgänger oder Nachfolger ableiten
         if prev is not None:
-            _, _, prev_top = prev
+            _, prev_top = prev
             strip_h = y_top - prev_top
             y_bot = min(page_height, y_top + max(strip_h, NP_MARGIN_BOT))
         elif nxt is not None:
-            _, _, nxt_top = nxt
+            _, nxt_top = nxt
             strip_h = nxt_top - y_top
             y_bot = min(page_height, y_top + max(strip_h, NP_MARGIN_BOT))
         else:
@@ -551,8 +546,10 @@ class StripApp:
             for p, k in self._np_manual_bot
         }
 
-        # NP einfügen
-        points.insert(insert_pos, (x_pdf, y_pdf, y_top))
+        # NP einfügen — einzeln per Klick gesetzt = sofort fixiert (snap to grid),
+        # wird nie automatisch von einer anderen Nullzeile mitgezogen
+        points.insert(insert_pos, (y_pdf, y_top))
+        self._np_manual.add((self.page_index, insert_pos))
 
         # Cuts einfügen: Position im cuts-Array = insert_pos * 2
         cuts.insert(insert_pos * 2, y_top)
@@ -561,7 +558,7 @@ class StripApp:
         # Untergrenze des Vorgängers anpassen — nur wenn nicht manuell gesetzt
         prev_np_idx = insert_pos - 1
         if prev is not None and (self.page_index, prev_np_idx) not in self._np_manual_bot:
-            _, _, prev_top = prev
+            _, prev_top = prev
             for j in range(0, len(cuts) - 1, 2):
                 if abs(cuts[j] - prev_top) < 1.0:
                     cuts[j + 1] = y_top - NP_BOTTOM_GAP
@@ -569,28 +566,30 @@ class StripApp:
 
         # Obergrenze des Nachfolgers anpassen (Streifenhöhe beibehalten)
         if nxt is not None:
-            _, _, nxt_top = nxt
+            _, nxt_top = nxt
             cuts[insert_pos * 2 + 1] = nxt_top - NP_BOTTOM_GAP
 
         n = len(points)
         self.status.config(
-            text=f"Nullpunkt {insert_pos + 1}/{n} gesetzt (y={y_pdf:.0f} pt)")
+            text=f"Nullzeile {insert_pos + 1}/{n} gesetzt (y={y_pdf:.0f} pt)")
         self._draw_lines()
 
     def _draw_np_markers(self, page_height):
-        """Zeichnet NP-Zonengrenze und Rauten an Nullpunkt-Positionen."""
+        """Zeichnet NP-Zonengrenze und Nullzeilen-Marker (horizontale Linie)."""
         page_w = self.doc[self.page_index].rect.width * self.scale
         h = page_height * self.scale
         x_zone = page_w * NP_ZONE_FRAC
         self.canvas.create_line(x_zone, 0, x_zone, h,
-                                fill="#00bb44", width=1, dash=(3, 9),
+                                fill="#00bb44", width=1, dash=(1, 3),
                                 tags="line")
-        for x_pdf, y_pdf, _ in self._np_points.get(self.page_index, []):
-            xc = x_pdf * self.scale
+        for y_pdf, _ in self._np_points.get(self.page_index, []):
             yc = y_pdf * self.scale
             r = 6
-            self.canvas.create_polygon(
-                xc, yc - r, xc + r, yc, xc, yc + r, xc - r, yc,
+            self.canvas.create_line(0, yc, x_zone, yc,
+                                    fill="#00cc44", width=2,
+                                    tags=("line", "np_marker"))
+            self.canvas.create_oval(
+                x_zone / 2 - r, yc - r, x_zone / 2 + r, yc + r,
                 fill="#00cc44", outline="#ffffff", width=1,
                 tags=("line", "np_marker")
             )
@@ -780,34 +779,23 @@ class StripApp:
             return None
         return round(angle * 2) / 2   # auf 0.5° runden
 
-    def _draw_snap_indicator(self, y_canvas, x_cursor=None):
-        """Zeichnet Y-Snap-Indikator. Wenn x_cursor gesetzt: Platzierungs-Modus."""
+    def _draw_snap_indicator(self, y_canvas, snapped):
+        """Zeichnet Y-Vorschau in der NP-Zone: eingerastet (Notenlinie erkannt,
+        hell) oder frei schwebend (keine Linie erkannt, rohe Mausposition, matt)."""
         self.canvas.delete("snap_indicator")
         if y_canvas is None:
             return
         page_w = (self.doc[self.page_index].rect.width * self.scale if self.doc else 200)
         x_zone = page_w * NP_ZONE_FRAC
-        if x_cursor is not None:
-            # Platzierungs-Modus: Y-Linie + Diamond live bei (x_cursor, y_canvas)
-            self.canvas.create_line(0, y_canvas, page_w, y_canvas,
-                                    fill="#00ff66", width=1, dash=(4, 3),
-                                    tags="snap_indicator")
-            r = 8
-            xc, yc = x_cursor, y_canvas
-            self.canvas.create_polygon(
-                xc, yc - r, xc + r, yc, xc, yc + r, xc - r, yc,
-                fill="#004422", outline="#00ff66", width=2,
-                tags="snap_indicator")
-        else:
-            # Hover-Modus: Kreis + kurze Linie in NP-Zone
-            r = 7
-            xc = x_zone / 2
-            self.canvas.create_oval(xc - r, y_canvas - r, xc + r, y_canvas + r,
-                                    outline="#00ff66", width=2,
-                                    tags="snap_indicator")
-            self.canvas.create_line(0, y_canvas, x_zone, y_canvas,
-                                    fill="#00ff66", width=1, dash=(2, 4),
-                                    tags="snap_indicator")
+        r = 7
+        xc = x_zone / 2
+        color = "#00ff66" if snapped else "#4d7a5f"
+        self.canvas.create_oval(xc - r, y_canvas - r, xc + r, y_canvas + r,
+                                outline=color, width=2,
+                                tags="snap_indicator")
+        self.canvas.create_line(0, y_canvas, x_zone, y_canvas,
+                                fill=color, width=1, dash=(2, 4),
+                                tags="snap_indicator")
 
     def _draw_snap_x_indicator(self, x_canvas):
         """Zeichnet X-Snap-Indikator (senkrechte Linie)."""
@@ -827,7 +815,7 @@ class StripApp:
         """Gibt den NP-Index zurück, dessen orig_top mit y_val übereinstimmt, sonst None."""
         if y_val is None:
             return None
-        for i, (_, _, orig_top) in enumerate(self._np_points.get(self.page_index, [])):
+        for i, (_, orig_top) in enumerate(self._np_points.get(self.page_index, [])):
             if abs(orig_top - y_val) < 1.0:
                 return i
         return None
@@ -837,20 +825,20 @@ class StripApp:
         points = self._np_points.get(self.page_index, [])
         if np_idx >= len(points):
             return
-        x_np, y_np, _ = points[np_idx]
+        y_np, _ = points[np_idx]
         new_offset = y_np - new_top
-        points[np_idx] = (x_np, y_np, new_top)
+        points[np_idx] = (y_np, new_top)
         cuts = self.cuts_per_page.get(self.page_index, [])
         for k in range(np_idx + 1, len(points)):
             if (self.page_index, k) in self._np_manual:
                 break
-            xk, yk, old_top_k = points[k]
+            yk, old_top_k = points[k]
             new_top_k = yk - new_offset
             for j in range(0, len(cuts) - 1, 2):
                 if abs(cuts[j] - old_top_k) < 1.0:
                     cuts[j] = new_top_k
                     break
-            points[k] = (xk, yk, new_top_k)
+            points[k] = (yk, new_top_k)
 
     def _propagate_np_bot(self, np_idx, new_bot):
         """Propagiert geänderte Untergrenze als Ziel-HÖHE zu allen folgenden auto-Streifen.
@@ -861,7 +849,7 @@ class StripApp:
         cuts = self.cuts_per_page.get(self.page_index, [])
         if np_idx >= len(points):
             return
-        _, _, orig_top = points[np_idx]
+        _, orig_top = points[np_idx]
         page_height = self.doc[self.page_index].rect.height
 
         # Gezogenen Streifen setzen, neue Ziel-Höhe ableiten
@@ -879,7 +867,7 @@ class StripApp:
         for k in range(np_idx + 1, len(points)):
             if (self.page_index, k) in self._np_manual_bot:
                 break   # An manuell gesetzter Linie stoppen
-            _, _, top_k = points[k]
+            _, top_k = points[k]
             for j in range(0, len(cuts) - 1, 2):
                 if abs(cuts[j] - top_k) < 1.0:
                     cuts[j + 1] = min(cuts[j] + new_H, page_height)
@@ -894,7 +882,7 @@ class StripApp:
         points = self._np_points.get(self.page_index, [])
         if np_idx >= len(points):
             return
-        _, _, orig_top = points[np_idx]
+        _, orig_top = points[np_idx]
         cuts = self.cuts_per_page.get(self.page_index, [])
         for j in range(0, len(cuts) - 1, 2):
             if abs(cuts[j] - orig_top) < 1.0:
@@ -911,7 +899,7 @@ class StripApp:
                 new_manual.add((p, k - 1))
         self._np_manual = new_manual
         self._draw_lines()
-        self.status.config(text="Nullpunkt und Streifen gelöscht.")
+        self.status.config(text="Nullzeile und Streifen gelöscht.")
 
     # ------------------------------------------------- Taktzahlen ------------
 
@@ -1142,6 +1130,8 @@ class StripApp:
         k = self._find_strip_at(y_canvas)
         if k is None:
             return None
+        if not LEFT_MARGIN_ENABLED:
+            return 'bottom'
         left_x_pdf = self.left_margin_per_page.get(self.page_index, 0)
         if x_canvas < left_x_pdf * self.scale + LEFT_ZONE_PX:
             return 'left'
@@ -1163,11 +1153,11 @@ class StripApp:
             return
         # NP-Zone: linke X% der Seite
         if self._is_np_zone(x_canvas):
-            for xp, yp, _ in self._np_points.get(self.page_index, []):
-                if abs(xp * self.scale - x_canvas) <= 12 and abs(yp * self.scale - y_canvas) <= 12:
-                    self.canvas.config(cursor="fleur")
+            for yp, _ in self._np_points.get(self.page_index, []):
+                if abs(yp * self.scale - y_canvas) <= DRAG_TOLERANCE:
+                    self.canvas.config(cursor="sb_v_double_arrow")
                     return
-            self.canvas.config(cursor="tcross")
+            self.canvas.config(cursor="plus")
             return
         # Über Taktzahl-Label?
         items = self.canvas.find_overlapping(x_canvas - 1, y_canvas - 1,
@@ -1205,21 +1195,16 @@ class StripApp:
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
         in_np_zone = self._is_np_zone(x_canvas) and self.doc is not None
-        # Platzierungs-Modus: Y gesperrt, X per Drag
-        if self._np_placing and self._np_placing_y is not None:
-            self._draw_snap_indicator(self._np_placing_y, x_cursor=x_canvas)
-            self._snap_x = self._snap_to_vertical(x_canvas, self._np_placing_y)
-            self._draw_snap_x_indicator(self._snap_x)
-            return
-        # Y-Snap in NP-Zone
+        # Y-Snap in NP-Zone: eingerastet wenn erkannt, sonst frei schwebend
         if in_np_zone:
-            self._snap_y = self._snap_to_staff(x_canvas, y_canvas)
-            self._draw_snap_indicator(self._snap_y)
+            self._snap_y = self._snap_to_staff(NP_SCAN_X, y_canvas)
+            preview_y = self._snap_y if self._snap_y is not None else y_canvas
+            self._draw_snap_indicator(preview_y, snapped=self._snap_y is not None)
         else:
             self._snap_y = None
             self.canvas.delete("snap_indicator")
-        # X-Snap überall (für linken Rand)
-        if self.doc is not None:
+        # X-Snap überall (für linken Rand) — vorerst deaktiviert
+        if LEFT_MARGIN_ENABLED and self.doc is not None:
             self._snap_x = self._snap_to_vertical(x_canvas, y_canvas)
             self._draw_snap_x_indicator(self._snap_x)
         else:
@@ -1238,15 +1223,23 @@ class StripApp:
         y_canvas = self.canvas.canvasy(event.y)
         x_canvas = self.canvas.canvasx(event.x)
 
-        # NP-Rauten haben Priorität: immer zuerst prüfen (auch außerhalb NP-Zone!)
-        points = self._np_points.get(self.page_index, [])
-        for i, (xp, yp, _) in enumerate(points):
-            if abs(xp * self.scale - x_canvas) <= 12 and abs(yp * self.scale - y_canvas) <= 12:
-                self._drag_np_index = i
-                self._drag_line_index = None
-                self._drag_np_top_idx = None
-                self.canvas.config(cursor="fleur")
-                return
+        # NP-Zone: ausschliesslich Nullzeilen-Dinge, keine generelle Linien-Logik
+        # (symmetrisch zu on_right_click — links = alles Linien-Bezogene)
+        if self._is_np_zone(x_canvas):
+            points = self._np_points.get(self.page_index, [])
+            for i, (yp, _) in enumerate(points):
+                if abs(yp * self.scale - y_canvas) <= DRAG_TOLERANCE:
+                    self._drag_np_index = i
+                    self._drag_line_index = None
+                    self._drag_np_top_idx = None
+                    self.canvas.config(cursor="sb_v_double_arrow")
+                    return
+            # Kein Marker-Treffer: neue Nullzeile setzen (auch überlappend mit
+            # bestehenden Streifen erlaubt — z.B. für tiefe Töne, die noch zum
+            # oberen System zählen sollen)
+            locked_y = self._snap_y if self._snap_y is not None else y_canvas
+            self._add_nullpunkt(locked_y)
+            return
 
         idx = self._find_nearby_line(y_canvas)
         if idx is not None:
@@ -1262,79 +1255,68 @@ class StripApp:
                 self._drag_np_top_idx = self._find_np_by_top(cuts_now[idx])
             elif idx % 2 == 1 and idx - 1 < len(cuts_now):
                 self._drag_np_bot_idx = self._find_np_by_top(cuts_now[idx - 1])
-        else:
-            self._drag_line_index = None
+            return
 
-            # Nullpunkt-Zone: neuen NP setzen
-            if self._is_np_zone(x_canvas):
-                # NP nur in grauen Bereichen erlauben (nicht innerhalb Streifen)
-                if self._find_strip_at(y_canvas) is not None:
-                    self.status.config(text="Nullpunkt nur ausserhalb bestehender Streifen setzen.")
-                    return
-                # Y sperren, Platzierungs-Modus starten (X per Drag)
-                locked_y = self._snap_y if self._snap_y is not None else y_canvas
-                self._np_placing = True
-                self._np_placing_y = locked_y
-                self._draw_snap_indicator(locked_y, x_cursor=x_canvas)
-                self.canvas.config(cursor="sb_h_double_arrow")
-                return
+        self._drag_line_index = None
 
-            y_pdf = self._canvas_to_pdf_y(y_canvas)
-            page_height = self.doc[self.page_index].rect.height
-            zone = self._strip_zone(x_canvas, y_canvas)
+        y_pdf = self._canvas_to_pdf_y(y_canvas)
+        page_height = self.doc[self.page_index].rect.height
+        zone = self._strip_zone(x_canvas, y_canvas)
 
-            # Klick links im Streifen → linken Rand setzen
-            if zone == 'left':
-                x_eff = self._snap_x if self._snap_x is not None else x_canvas
-                x_pdf = x_eff / self.scale
-                self.left_margin_per_page[self.page_index] = x_pdf
-                self._draw_lines()
-                self.status.config(text=f"Linker Rand gesetzt: x={x_pdf:.1f} pt")
-                return
-
-            # Klick im Streifen (Rest) → Unterkante (grüne Linie) verschieben
-            k = self._find_strip_at(y_canvas)
-            if k is not None:
-                cuts = self.cuts_per_page[self.page_index]
-                cuts[2 * k + 1] = y_pdf
-                pairs = sorted(zip(range(len(cuts) // 2),
-                                   zip(cuts[::2], cuts[1::2])),
-                               key=lambda x: x[1][0])
-                strip_nr = next(i + 1 for i, (ki, _) in enumerate(pairs) if ki == k)
-                self.status.config(
-                    text=f"Streifen {strip_nr}: Unterkante → y={y_pdf:.1f} pt")
-                self._draw_lines()
-                return
-
-            # Neuen Schnitt setzen (grauer Bereich)
-            if self.page_index not in self.cuts_per_page:
-                self.cuts_per_page[self.page_index] = []
-            self.cuts_per_page[self.page_index].append(y_pdf)
-            n = len(self.cuts_per_page[self.page_index])
-            kind = "Oberkante" if n % 2 == 1 else "Unterkante"
-            self.status.config(text=f"Seite {self.page_index + 1}: {kind} Streifen {(n + 1) // 2} gesetzt (y={y_pdf:.1f} pt)")
+        # Klick links im Streifen → linken Rand setzen
+        if zone == 'left':
+            x_eff = self._snap_x if self._snap_x is not None else x_canvas
+            x_pdf = x_eff / self.scale
+            self.left_margin_per_page[self.page_index] = x_pdf
             self._draw_lines()
+            self.status.config(text=f"Linker Rand gesetzt: x={x_pdf:.1f} pt")
+            return
 
-    def _drag_np(self, np_idx, x_canvas, y_canvas):
-        """Verschiebt einen Nullpunkt. Y snapt auf Notenlinie; X ist frei anpassbar."""
+        # Klick im Streifen (Rest) → Unterkante (grüne Linie) verschieben
+        k = self._find_strip_at(y_canvas)
+        if k is not None:
+            cuts = self.cuts_per_page[self.page_index]
+            cuts[2 * k + 1] = y_pdf
+            pairs = sorted(zip(range(len(cuts) // 2),
+                               zip(cuts[::2], cuts[1::2])),
+                           key=lambda x: x[1][0])
+            strip_nr = next(i + 1 for i, (ki, _) in enumerate(pairs) if ki == k)
+            self.status.config(
+                text=f"Streifen {strip_nr}: Unterkante → y={y_pdf:.1f} pt")
+            self._draw_lines()
+            return
+
+        # Neuen Schnitt setzen (grauer Bereich)
+        if self.page_index not in self.cuts_per_page:
+            self.cuts_per_page[self.page_index] = []
+        self.cuts_per_page[self.page_index].append(y_pdf)
+        n = len(self.cuts_per_page[self.page_index])
+        kind = "Oberkante" if n % 2 == 1 else "Unterkante"
+        self.status.config(text=f"Seite {self.page_index + 1}: {kind} Streifen {(n + 1) // 2} gesetzt (y={y_pdf:.1f} pt)")
+        self._draw_lines()
+
+    def _drag_np(self, np_idx, y_canvas):
+        """Verschiebt eine Nullzeile vertikal. Y snapt auf Notenlinie.
+        Direktes Anfassen fixiert die Nullzeile (snap to grid, ground truth) —
+        sie wird danach nie mehr automatisch von einer anderen mitgezogen."""
         points = self._np_points.get(self.page_index, [])
         if np_idx >= len(points):
             return
+        self._np_manual.add((self.page_index, np_idx))
         # Y: snap wenn verfügbar, sonst freie Bewegung
         if self._snap_y is not None:
             y_canvas = self._snap_y
-        x_pdf = x_canvas / self.scale
         y_pdf = y_canvas / self.scale
-        _, y_old, orig_top = points[np_idx]
+        y_old, orig_top = points[np_idx]
         page_height = self.doc[self.page_index].rect.height
         # NP-Reihenfolge erzwingen
         if np_idx > 0:
-            y_pdf = max(y_pdf, points[np_idx - 1][1] + 1)
+            y_pdf = max(y_pdf, points[np_idx - 1][0] + 1)
         # Nachfolger werden mitgezogen → kein clamp nach unten nötig
         delta_y = y_pdf - y_old
         cuts = self.cuts_per_page.get(self.page_index, [])
 
-        # Diesen NP verschieben
+        # Diese Nullzeile verschieben
         new_top = max(0.0, y_pdf - NP_MARGIN_TOP)
         for j in range(0, len(cuts) - 1, 2):
             if abs(cuts[j] - orig_top) < 1.0:
@@ -1342,11 +1324,11 @@ class StripApp:
                 cuts[j]     = new_top
                 cuts[j + 1] = min(page_height, new_top + old_height)
                 break
-        points[np_idx] = (x_pdf, y_pdf, new_top)
+        points[np_idx] = (y_pdf, new_top)
 
         # Untergrenze des Vorgänger-Streifens mitziehen
         if np_idx > 0:
-            _, _, prev_orig_top = points[np_idx - 1]
+            _, prev_orig_top = points[np_idx - 1]
             for j in range(0, len(cuts) - 1, 2):
                 if abs(cuts[j] - prev_orig_top) < 1.0:
                     cuts[j + 1] = new_top - NP_BOTTOM_GAP
@@ -1356,10 +1338,10 @@ class StripApp:
         for k in range(np_idx + 1, len(points)):
             if (self.page_index, k) in self._np_manual:
                 break
-            xk, yk, top_k = points[k]
+            yk, top_k = points[k]
             new_yk = yk + delta_y
             new_top_k = max(0.0, top_k + delta_y)
-            new_yk = max(new_yk, points[k - 1][1] + 1)
+            new_yk = max(new_yk, points[k - 1][0] + 1)
             new_top_k = max(0.0, new_yk - NP_MARGIN_TOP)
             for j in range(0, len(cuts) - 1, 2):
                 if abs(cuts[j] - top_k) < 1.0:
@@ -1368,16 +1350,16 @@ class StripApp:
                     cuts[j + 1] = min(page_height, new_top_k + old_h)
                     break
             # Untergrenze von NP[k-1] anpassen
-            _, _, prev_top_k = points[k - 1]
+            _, prev_top_k = points[k - 1]
             for j in range(0, len(cuts) - 1, 2):
                 if abs(cuts[j] - prev_top_k) < 1.0:
                     cuts[j + 1] = new_top_k - NP_BOTTOM_GAP
                     break
-            points[k] = (xk, new_yk, new_top_k)
+            points[k] = (new_yk, new_top_k)
 
         self._draw_lines()
 
-    def _add_np_to_page(self, page_idx, x_pdf, y_pdf):
+    def _add_np_to_page(self, page_idx, y_pdf):
         """NP ans Ende einer Seite anhängen (fill-Funktionen, immer aufsteigend)."""
         page = self.doc[page_idx]
         page_height = page.rect.height
@@ -1385,7 +1367,7 @@ class StripApp:
         points = self._np_points.setdefault(page_idx, [])
         cuts = self.cuts_per_page.setdefault(page_idx, [])
         if points:
-            _, _, prev_top = points[-1]
+            _, prev_top = points[-1]
             strip_h = y_top - prev_top
             y_bot = min(page_height, y_top + max(strip_h, NP_MARGIN_BOT))
             for j in range(0, len(cuts) - 1, 2):
@@ -1394,78 +1376,64 @@ class StripApp:
                     break
         else:
             y_bot = min(page_height, y_pdf + NP_MARGIN_BOT)
-        points.append((x_pdf, y_pdf, y_top))
+        points.append((y_pdf, y_top))
         cuts.extend([y_top, y_bot])
 
     def _np_calibration(self, page_idx):
-        """Gibt (dy, dx, x_base, einzug_dx) zurück, oder None.
-        x_base  = x-Position der regulären Systeme (ohne Einzug)
-        einzug_dx = Einzug von NP[0] relativ zu x_base (0 wenn kein Einzug)
-        """
+        """Gibt den mittleren Zeilenabstand dy der Nullzeilen zurück, oder None."""
         points = self._np_points.get(page_idx, [])
         if len(points) < 2:
             return None
-        dys = [points[i+1][1] - points[i][1] for i in range(len(points)-1)]
+        dys = [points[i+1][0] - points[i][0] for i in range(len(points)-1)]
         dy = sum(dys) / len(dys)
         if dy <= 0:
             return None
-        # x-Basis aus NP[1..n] (ohne NP[0], falls Einzug)
-        xs = [p[0] for p in points[1:]] if len(points) > 1 else [points[0][0]]
-        x_base = sum(xs) / len(xs)
-        dx = 0.0  # reguläre Systeme haben keinen x-Drift (Annahme)
-        # Einzug erkennen: NP[0].x > x_base + 10pt
-        einzug_dx = points[0][0] - x_base if points[0][0] > x_base + 10 else 0.0
-        return (dy, dx, x_base, einzug_dx)
+        return dy
 
     def np_fill_page(self):
         """Füllt die aktuelle Seite mit NPs basierend auf dem Abstand der letzten zwei NPs."""
         if self.doc is None:
             return
-        cal = self._np_calibration(self.page_index)
-        if cal is None:
-            self.status.config(text="Mindestens 2 Nullpunkte nötig zum Füllen.")
+        dy = self._np_calibration(self.page_index)
+        if dy is None:
+            messagebox.showinfo("Nullzeile füllen",
+                                 "Mindestens 2 Nullzeilen setzen, um den Zeilenabstand zu berechnen.")
+            self.status.config(text="Mindestens 2 Nullzeilen nötig zum Füllen.")
             return
-        dy, dx, x_base, _ = cal
         points = self._np_points[self.page_index]
-        _, y_last, _ = points[-1]
+        y_last, _ = points[-1]
         page_height = self.doc[self.page_index].rect.height
-        page_w = self.doc[self.page_index].rect.width
         added = 0
         y_next = y_last + dy
         while y_next < page_height - NP_MARGIN_TOP:
-            self._add_np_to_page(self.page_index,
-                                 max(0.0, min(x_base, page_w)), y_next)
+            self._add_np_to_page(self.page_index, y_next)
             y_next += dy
             added += 1
         self._draw_lines()
-        self.status.config(text=f"{added} Nullpunkt(e) ergänzt.")
+        self.status.config(text=f"{added} Nullzeile(n) ergänzt.")
 
     def np_fill_all_pages(self):
         """Füllt alle Seiten ohne NPs anhand der Kalibrierung der aktuellen Seite."""
         if self.doc is None:
             return
-        cal = self._np_calibration(self.page_index)
-        if cal is None:
-            self.status.config(text="Mindestens 2 Nullpunkte auf aktueller Seite nötig.")
+        dy = self._np_calibration(self.page_index)
+        if dy is None:
+            messagebox.showinfo("Nullzeile füllen",
+                                 "Mindestens 2 Nullzeilen auf der aktuellen Seite setzen, um den Zeilenabstand zu berechnen.")
+            self.status.config(text="Mindestens 2 Nullzeilen auf aktueller Seite nötig.")
             return
-        dy, dx, x_base, einzug_dx = cal
         src_points = self._np_points[self.page_index]
-        y_start = src_points[0][1]
+        y_start = src_points[0][0]
         filled = 0
         for page_idx in range(self.page_count):
             if self._np_points.get(page_idx):
                 continue   # bereits NPs vorhanden
             page = self.doc[page_idx]
             page_h = page.rect.height
-            page_w = page.rect.width
             y_cur = y_start
-            first = True
             while y_cur < page_h - NP_MARGIN_TOP:
-                x_cur = x_base + (einzug_dx if first else 0.0)
-                self._add_np_to_page(page_idx,
-                                     max(0.0, min(x_cur, page_w)), y_cur)
+                self._add_np_to_page(page_idx, y_cur)
                 y_cur += dy
-                first = False
             filled += 1
         self._draw_lines()
         self.status.config(text=f"{filled} Seite(n) mit NPs gefüllt.")
@@ -1473,16 +1441,10 @@ class StripApp:
     def on_drag(self, event):
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
-        # Platzierungs-Modus: Diamond folgt der Maus horizontal
-        if self._np_placing and self._np_placing_y is not None:
-            self._snap_x = self._snap_to_vertical(x_canvas, self._np_placing_y)
-            self._draw_snap_x_indicator(self._snap_x)
-            self._draw_snap_indicator(self._np_placing_y, x_cursor=x_canvas)
-            return
         if self._drag_np_index is not None and self.doc is not None:
             # Snap während Drag neu berechnen (on_mouse_move feuert bei B1-Motion nicht)
-            self._snap_y = self._snap_to_staff(x_canvas, y_canvas)
-            self._drag_np(self._drag_np_index, x_canvas, y_canvas)
+            self._snap_y = self._snap_to_staff(NP_SCAN_X, y_canvas)
+            self._drag_np(self._drag_np_index, y_canvas)
             return
         if self._drag_line_index is None or self.doc is None:
             return
@@ -1499,18 +1461,6 @@ class StripApp:
         self._draw_lines()
 
     def on_mouse_up(self, event):
-        x_canvas = self.canvas.canvasx(event.x)
-        y_canvas = self.canvas.canvasy(event.y)
-        # Platzierungs-Modus beenden: NP setzen
-        if self._np_placing and self._np_placing_y is not None:
-            self._np_placing = False
-            x_eff = self._snap_x if self._snap_x is not None else x_canvas
-            self._add_nullpunkt(x_eff, self._np_placing_y)
-            self._np_placing_y = None
-            self._snap_x = None
-            self.canvas.delete("snap_x_indicator")
-            self.canvas.delete("snap_indicator")
-            return
         self._drag_line_index = None
         self._drag_np_index = None
         self.canvas.delete("snap_indicator")
@@ -1533,13 +1483,13 @@ class StripApp:
         y_canvas = self.canvas.canvasy(event.y)
         page_height = self.doc[self.page_index].rect.height
 
-        # 0. NP-Zone: Rechtsklick auf Raute → Nullpunkt entfernen
+        # 0. NP-Zone: Rechtsklick auf Nullzeilen-Marker → Nullzeile entfernen
         if self._is_np_zone(x_canvas):
             points = self._np_points.get(self.page_index, [])
-            for i, (xp, yp, _) in enumerate(points):
-                if abs(xp * self.scale - x_canvas) <= 12 and abs(yp * self.scale - y_canvas) <= 12:
+            for i, (yp, _) in enumerate(points):
+                if abs(yp * self.scale - y_canvas) <= DRAG_TOLERANCE:
                     points.pop(i)
-                    self.status.config(text="Nullpunkt entfernt (Schnittlinien bleiben).")
+                    self.status.config(text="Nullzeile entfernt (Schnittlinien bleiben).")
                     self._draw_lines()
                     return
             return  # Kein Treffer: kein Standardverhalten in NP-Zone
@@ -1556,7 +1506,7 @@ class StripApp:
                             # Durchgezogen → gestrichelt (Manual-Flag entfernen)
                             self._np_manual.discard((self.page_index, np_idx))
                             self._draw_lines()
-                            self.status.config(text="Manuelle Korrektur zurückgesetzt (NP aktiv).")
+                            self.status.config(text="Manuelle Korrektur zurückgesetzt (Nullzeile aktiv).")
                         else:
                             # Gestrichelt → NP + Streifen löschen
                             self._delete_np_and_strip(np_idx)
@@ -1576,7 +1526,9 @@ class StripApp:
                 self.status.config(text="Linker Rand entfernt.")
                 return
 
-        # 3. Sonst: linken Rand an X-Position setzen (mit X-Snap)
+        # 3. Sonst: linken Rand an X-Position setzen (mit X-Snap) — vorerst deaktiviert
+        if not LEFT_MARGIN_ENABLED:
+            return
         x_eff = self._snap_x if self._snap_x is not None else x_canvas
         x_pdf = x_eff / self.scale
         self.left_margin_per_page[self.page_index] = x_pdf
@@ -1724,7 +1676,7 @@ class StripApp:
         self.pagebreak_set = {(p, l) for p, l in self.pagebreak_set
                               if p != self.page_index}
         self._draw_lines()
-        self.status.config(text="Alle Linien und Nullpunkte dieser Seite gelöscht.")
+        self.status.config(text="Alle Linien und Nullzeilen dieser Seite gelöscht.")
 
     # -------------------------------------------------------- PDF-Export ----
 
