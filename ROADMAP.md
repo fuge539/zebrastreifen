@@ -65,27 +65,52 @@ welcher zur Sicherung vorher nach GitHub gepusht wurde):
   zum Hover-Indikator (`_draw_snap_indicator`).
 - Hit-Testing/Drag nur noch Y-basiert (+ NP-Zonen-Zugehörigkeit).
 
-## Später: Y-Modus / X-Modus (Tablet-Kante)
+## ~~Später~~ Erledigt: Y-Modus / X-Modus (Seitenränder)
 
-Idee (statt räumlicher NP-Zone): globaler Umschalter zwischen zwei
-Ansichten, gleiche Klick-/Drag-/Snap-Logik, nur auf verschiedene Achse
-angewendet:
-- **Y-Modus** (Standard): Streifen setzen — das, was gerade zur
-  Nullzeile wird.
-- **X-Modus**: linke/rechte Kante für Tablet-Ansicht präzise setzen
-  (die eigentliche Motivation hinter der ursprünglichen NP-X-Idee).
+**Umgesetzt & getestet.** Globaler Umschalter zwischen zwei Ansichten,
+per Klick auf die Zonen-Labels (kein Toolbar-Button):
+- **Y-Modus** (Standard): Anker/Schnitte wie bisher.
+- **X-Modus**: linker/rechter Seitenrand für die ganze Seite. Klick
+  linke Hälfte → linker Rand, rechte Hälfte → rechter Rand (neu, gab's
+  vorher nicht — Export nutzte immer die volle Seitenbreite rechts).
+  Ein Klick überschreibt direkt, kein Drag/Löschen nötig. Vererbung wie
+  gehabt nach dem page-2-Muster (Seite 3 von Seite 1, Seite 4 von 2).
 
-Vorteil: keine Erkennung mehr nötig, "wo genau wurde geklickt" — jeder
-Klick bedeutet im aktiven Modus immer dasselbe. Löst auch das
-Rechtsklick-Problem oben.
+Umschalten: alle vier Labels ("← Anker"/"Schnitte →"/"Rand ▶"/"◀ Rand")
+sind **immer sichtbar**, in beiden Modi — das aktuell inaktive Paar wird
+gestippelt/gedimmt dargestellt (nicht per Farbwechsel, damit es sowohl
+auf dem dunklen Y-Modus- als auch dem hellen X-Modus-Hintergrund
+durchscheint statt als dunkles Loch zu wirken). Alle vier klickbar,
+schalten um. Bbox-Klick-Absicherung (gleiches Muster wie
+Tooltip-Erkennung) verhindert Kollision mit normalem Seiten-Klick.
 
-Nicht blockierend für den Nullzeile-Umbau — eigenständiges späteres
-Feature.
+Vererbungs-Bugfix nebenbei gefunden: `_transfer_left_margin`/
+`_transfer_right_margin` erbten nur von Seite-2 (page-2), nicht wie
+`_transfer_np_points` mit Fallback auf Seite-1 — dadurch bekam die
+direkt folgende Seite nie automatisch etwas. Jetzt mit Fallback
+(Seite-2 bevorzugt, sonst Seite-1) — konsistent mit dem bestehenden
+Nullzeilen-Vererbungsmuster.
 
-**Visuelles Detail (bestätigt):** Die "← Anker"/"Schnitte →"-Labels an der
-Zonengrenze (aktuell im Y-Modus) sollen im X-Modus zugunsten von
-Seitenrand-Markern verschwinden — Darstellung wie bei
-Textverarbeitungs-Linealen: ▶ / ◀ als Rand-Indikatoren statt Textlabels.
+Im X-Modus werden alle Y-Modus-Elemente ausgeblendet (nur Zonen-Labels
+bleiben sichtbar). Hintergrund: Y-Modus unverändert (dunkle Streifen
+zwischen Zebra-Zonen), X-Modus ganze Seite hellgrau getönt + dunkle
+Bänder ausserhalb der gesetzten Ränder.
+
+`LEFT_MARGIN_ENABLED`-Flag und die alten Y-Modus-Rand-Mechanismen
+(Rechtsklick-Fallback, Klick in Streifen-Linke-Zone) bleiben bewusst
+unverändert deaktiviert/tot — der X-Modus hat eine eigene, unabhängige
+Klick-Logik.
+
+Nicht enthalten (bewusst, da nicht verlangt): Lineal-Symbole (▶/◀ als
+reine Icons statt Textlabels) — könnte später noch als visuelle
+Verfeinerung ergänzt werden.
+
+**Offene Idee, zurückgestellt:** Drag statt nur Klick für Ränder im
+X-Modus — primär sinnvoll, um eine *bereits gesetzte* Randlinie direkt
+zu greifen/verschieben (analog zum bestehenden Linien-Drag im
+Y-Modus), nicht fürs erste Setzen (da bringt Drag wenig, erneutes
+Klicken hat denselben Effekt). Zurückgestellt, bis sich in der Praxis
+zeigt, ob Nachjustieren per Neu-Klick nervt.
 
 ## Später: weitere Ideen
 

@@ -84,6 +84,9 @@ class StripApp:
 
         # Pro Seite: linker Rand in PDF-Punkten (None = kein benutzerdefinierter Rand)
         self.left_margin_per_page: dict[int, float] = {}
+        # Pro Seite: rechter Rand in PDF-Punkten (X-Modus)
+        self.right_margin_per_page: dict[int, float] = {}
+        self._x_mode: bool = False  # False = Y-Modus (Anker/Schnitte), True = X-Modus (Ränder)
 
         # Aktuell angezeigte Seite als PhotoImage (muss als Referenz gehalten werden)
         self._photo = None
@@ -188,8 +191,19 @@ class StripApp:
             ("Ctrl+S",          "PDF exportieren"),
         ]
 
-        frame = tk.Frame(win)
-        frame.pack(padx=20, pady=4)
+        scroll_area = tk.Frame(win)
+        scroll_area.pack(padx=20, pady=4, fill=tk.BOTH, expand=True)
+        help_canvas = tk.Canvas(scroll_area, height=380, highlightthickness=0)
+        help_vsb = tk.Scrollbar(scroll_area, orient=tk.VERTICAL, command=help_canvas.yview)
+        help_canvas.configure(yscrollcommand=help_vsb.set)
+        help_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        help_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        help_canvas.bind("<MouseWheel>", lambda e: help_canvas.yview_scroll(-int(e.delta / 40), "units"))
+
+        frame = tk.Frame(help_canvas)
+        frame_win = help_canvas.create_window((0, 0), window=frame, anchor=tk.NW)
+        frame.bind("<Configure>", lambda e: help_canvas.configure(scrollregion=help_canvas.bbox("all")))
+        help_canvas.bind("<Configure>", lambda e: help_canvas.itemconfig(frame_win, width=e.width))
         for key, desc in shortcuts:
             if desc == "":
                 # Kategorie-Header oder Leerzeile
@@ -205,7 +219,7 @@ class StripApp:
                          anchor=tk.W).grid(row=row, column=1, sticky=tk.W)
 
         tk.Frame(win, height=1, bg="#ccc").pack(fill=tk.X, padx=20, pady=10)
-        tk.Label(win, text="Version 0.1  ·  © 2026 zebrastreifen",
+        tk.Label(win, text="Version 0.2 (Alpha)  ·  © 2026 zebrastreifen  ·  MIT-Lizenz",
                  font=("Helvetica", 8), fg="#888").pack(pady=(0, 16))
         tk.Button(win, text="Schliessen", command=win.destroy).pack(pady=(0, 16))
 
@@ -314,6 +328,8 @@ class StripApp:
         self._tooltip_win = None
         self._anker_hint_bbox = None
         self._schnitte_hint_bbox = None
+        self._rand_links_hint_bbox = None
+        self._rand_rechts_hint_bbox = None
         self._hint_shown = None
 
         # Tastaturshortcuts
@@ -355,6 +371,7 @@ class StripApp:
         self._rotation_manual = set()
         self._rotation_scanned = set()
         self.left_margin_per_page = {}
+        self.right_margin_per_page = {}
         self.takt_per_page = {}
         self.takt_manual = set()
         self.pagebreak_set = set()
@@ -404,22 +421,33 @@ class StripApp:
         self.page_label.config(text=f"Seite {self.page_index + 1} / {self.page_count}")
         self._draw_lines()
 
-    def _update_zone_tooltip(self, event, x_canvas, y_canvas):
-        """Zeigt/versteckt den Anker/Schnitte-Tooltip je nach Cursor-Position.
-        Manuelle Bereichsprüfung statt tag_bind Enter/Leave, siehe __init__."""
+    def _zone_hint_at(self, x_canvas, y_canvas):
+        """Gibt zurück, über welchem Zonen-Label (falls überhaupt) sich
+        x_canvas/y_canvas befindet: 'anker', 'schnitte', 'rand_links',
+        'rand_rechts' oder None. Von Tooltip UND Klick-Umschaltung genutzt."""
         def inside(bbox):
             return bbox is not None and bbox[0] <= x_canvas <= bbox[2] and bbox[1] <= y_canvas <= bbox[3]
 
         if inside(self._anker_hint_bbox):
-            hint = "anker"
-        elif inside(self._schnitte_hint_bbox):
-            hint = "schnitte"
-        else:
-            hint = None
+            return "anker"
+        if inside(self._schnitte_hint_bbox):
+            return "schnitte"
+        if inside(self._rand_links_hint_bbox):
+            return "rand_links"
+        if inside(self._rand_rechts_hint_bbox):
+            return "rand_rechts"
+        return None
 
+    def _update_zone_tooltip(self, event, x_canvas, y_canvas):
+        """Zeigt/versteckt den Zonen-Tooltip je nach Cursor-Position.
+        Manuelle Bereichsprüfung statt tag_bind Enter/Leave, siehe __init__."""
+        hint = self._zone_hint_at(x_canvas, y_canvas)
         if hint == self._hint_shown:
             return
         self._hint_shown = hint
+        if hint is None:
+            self._hide_tooltip()
+            return
         if hint == "anker":
             self._show_tooltip(event, "Anker", "Auf der linken Seite setzt Du einen Anker auf die "
                                                "oberste Notenlinie pro System.")
@@ -427,8 +455,12 @@ class StripApp:
             self._show_tooltip(event, "Schnitte", "Auf der rechten Seite definierst Du die Schnitte mit "
                                                   "Klick (Ober- und Unterkanten) und mit Ctrl+Klick "
                                                   "kombinierte Kanten.")
-        else:
-            self._hide_tooltip()
+        elif hint == "rand_links":
+            self._show_tooltip(event, "Rand", "Auf der linken Seite setzt Du den linken Rand für "
+                                              "die ganze Seite.")
+        elif hint == "rand_rechts":
+            self._show_tooltip(event, "Rand", "Auf der rechten Seite setzt Du den rechten Rand für "
+                                              "die ganze Seite.")
 
     def _show_tooltip(self, event, title, body):
         self._hide_tooltip()
@@ -452,9 +484,16 @@ class StripApp:
     def _draw_lines(self):
         """Zeichnet alle Schnittlinien der aktuellen Seite."""
         self.canvas.delete("line")
-        cuts = self.cuts_per_page.get(self.page_index, [])
         page_height = self.doc[self.page_index].rect.height
 
+        if self._x_mode:
+            # X-Modus: nur Rand-Hintergrund + Zonen-Labels, keine Y-Modus-Elemente
+            self._draw_x_mode_background(page_height)
+            self._draw_zone_labels(page_height)
+            self._update_layout_label()
+            return
+
+        cuts = self.cuts_per_page.get(self.page_index, [])
         w = int(self.doc[self.page_index].rect.width * self.scale)
         n_cuts = len(cuts)
         i = 0
@@ -494,6 +533,7 @@ class StripApp:
 
         # Nullpunkt-Marker
         self._draw_np_markers(page_height)
+        self._draw_zone_labels(page_height)
 
         # Seitenwechsel-Marker
         self._draw_pagebreak_markers(page_height)
@@ -503,6 +543,33 @@ class StripApp:
 
         # Layout-Vorschau aktualisieren
         self._update_layout_label()
+
+    def _draw_x_mode_background(self, page_height):
+        """X-Modus-Hintergrund: ganze Seite hellgrau getönt, Bereiche
+        ausserhalb der gesetzten Ränder dunkelgrau, plus die Randlinien."""
+        page = self.doc[self.page_index]
+        w = int(page.rect.width * self.scale)
+        h = int(page_height * self.scale)
+
+        self.canvas.create_rectangle(0, 0, w, h, fill="#dddddd", stipple="gray25",
+                                     outline="", tags="line")
+
+        left_x_pdf = self.left_margin_per_page.get(self.page_index, 0.0)
+        right_x_pdf = self.right_margin_per_page.get(self.page_index, page.rect.width)
+        left_x = left_x_pdf * self.scale
+        right_x = right_x_pdf * self.scale
+
+        if left_x > 0:
+            self.canvas.create_rectangle(0, 0, left_x, h, fill="#333333",
+                                         stipple="gray50", outline="", tags="line")
+        if right_x < w:
+            self.canvas.create_rectangle(right_x, 0, w, h, fill="#333333",
+                                         stipple="gray50", outline="", tags="line")
+
+        self.canvas.create_line(left_x, 0, left_x, h, fill="#3399ff", width=2,
+                                dash=(6, 4), tags="line")
+        self.canvas.create_line(right_x, 0, right_x, h, fill="#3399ff", width=2,
+                                dash=(6, 4), tags="line")
 
     def _draw_strips(self):
         """Graut alle Bereiche aus, die NICHT behalten werden (Negativ-Darstellung)."""
@@ -648,6 +715,40 @@ class StripApp:
             text=f"Anker {insert_pos + 1}/{n} gesetzt (y={y_pdf:.0f} pt)")
         self._draw_lines()
 
+    def _draw_zone_labels(self, page_height):
+        """Zeichnet die Zonen-Labels (Anker/Schnitte bzw. Rand) — dienen als
+        Erklärung UND als Klickfläche zum Umschalten zwischen Y- und
+        X-Modus (Bbox-Prüfung siehe _update_zone_tooltip/on_mouse_down)."""
+        page_w = self.doc[self.page_index].rect.width * self.scale
+        x_zone = page_w * NP_ZONE_FRAC
+        zone_font = ("Helvetica", 9, "bold")
+
+        def chip(text, x, anchor, active, text_fill, bg_fill, outline, attr):
+            fill = text_fill if active else "#999999"
+            item = self.canvas.create_text(x, 14, text=text, fill=fill,
+                                           anchor=anchor, font=zone_font, tags="line")
+            bbox = self.canvas.bbox(item)
+            pad_bbox = (bbox[0] - 4, bbox[1] - 2, bbox[2] + 4, bbox[3] + 2)
+            # Inaktiv: gestippelt statt voll deckend, damit der Hintergrund
+            # (dunkel im Y-Modus, hell im X-Modus) durchscheint statt eines
+            # dunklen "Lochs".
+            rect_kwargs = dict(fill=bg_fill, outline=outline if active else "#999999", tags="line")
+            if not active:
+                rect_kwargs["stipple"] = "gray25"
+            self.canvas.create_rectangle(*pad_bbox, **rect_kwargs)
+            self.canvas.tag_raise(item)
+            setattr(self, attr, pad_bbox)
+
+        y_active = not self._x_mode
+        chip("← Anker", x_zone - 10, tk.E, y_active,
+            "#eafff2", "#1a3a2a", "#00bb44", "_anker_hint_bbox")
+        chip("Schnitte →", x_zone + 10, tk.W, y_active,
+            "#eafff2", "#1a3a2a", "#00bb44", "_schnitte_hint_bbox")
+        chip("Rand ▶", 10, tk.W, self._x_mode,
+            "#eaf4ff", "#1a2a3a", "#3399ff", "_rand_links_hint_bbox")
+        chip("◀ Rand", page_w - 10, tk.E, self._x_mode,
+            "#eaf4ff", "#1a2a3a", "#3399ff", "_rand_rechts_hint_bbox")
+
     def _draw_np_markers(self, page_height):
         """Zeichnet NP-Zonengrenze und Nullzeilen-Marker (horizontale Linie)."""
         page_w = self.doc[self.page_index].rect.width * self.scale
@@ -656,16 +757,6 @@ class StripApp:
         self.canvas.create_line(x_zone, 0, x_zone, h,
                                 fill="#00bb44", width=1, dash=(1, 3),
                                 tags="line")
-        zone_font = ("Helvetica", 9, "bold")
-        for text, x, anchor, attr in (("← Anker", x_zone - 10, tk.E, "_anker_hint_bbox"),
-                                      ("Schnitte →", x_zone + 10, tk.W, "_schnitte_hint_bbox")):
-            item = self.canvas.create_text(x, 14, text=text, fill="#eafff2",
-                                           anchor=anchor, font=zone_font, tags="line")
-            bbox = self.canvas.bbox(item)
-            pad_bbox = (bbox[0] - 4, bbox[1] - 2, bbox[2] + 4, bbox[3] + 2)
-            self.canvas.create_rectangle(*pad_bbox, fill="#1a3a2a", outline="#00bb44", tags="line")
-            self.canvas.tag_raise(item)
-            setattr(self, attr, pad_bbox)
         for y_pdf, _ in self._np_points.get(self.page_index, []):
             yc = y_pdf * self.scale
             r = 6
@@ -1310,6 +1401,24 @@ class StripApp:
         x_canvas = self.canvas.canvasx(event.x)
         y_canvas = self.canvas.canvasy(event.y)
         self._update_zone_tooltip(event, x_canvas, y_canvas)
+
+        if self.doc is not None and self._zone_hint_at(x_canvas, y_canvas) is not None:
+            self.canvas.config(cursor="hand2")
+            return
+
+        if self._x_mode:
+            # X-Modus: Rand-Vorschau überall (Snap auf senkrechte Linien)
+            if self.doc is not None:
+                self._snap_x = self._snap_to_vertical(x_canvas, y_canvas)
+                self._draw_snap_x_indicator(self._snap_x)
+            else:
+                self._snap_x = None
+                self.canvas.delete("snap_x_indicator")
+            self._snap_y = None
+            self.canvas.delete("snap_indicator")
+            self.canvas.config(cursor="sb_h_double_arrow")
+            return
+
         in_np_zone = self._is_np_zone(x_canvas) and self.doc is not None
         shift_held = bool(event.state & 0x0001)
         # Y-Snap in NP-Zone: eingerastet wenn erkannt, sonst frei schwebend
@@ -1355,6 +1464,28 @@ class StripApp:
             return
         y_canvas = self.canvas.canvasy(event.y)
         x_canvas = self.canvas.canvasx(event.x)
+
+        # Zonen-Label angeklickt: Y/X-Modus umschalten (Vorrang vor allem anderen)
+        if self._zone_hint_at(x_canvas, y_canvas) is not None:
+            self._x_mode = not self._x_mode
+            self._hint_shown = None
+            self._hide_tooltip()
+            self._draw_lines()
+            return
+
+        if self._x_mode:
+            # X-Modus: Klick setzt linken oder rechten Rand für die ganze Seite
+            page_w_canvas = self.doc[self.page_index].rect.width * self.scale
+            x_eff = self._snap_x if self._snap_x is not None else x_canvas
+            x_pdf = x_eff / self.scale
+            if x_canvas < page_w_canvas / 2:
+                self.left_margin_per_page[self.page_index] = x_pdf
+                self.status.config(text=f"Linker Rand gesetzt: x={x_pdf:.1f} pt")
+            else:
+                self.right_margin_per_page[self.page_index] = x_pdf
+                self.status.config(text=f"Rechter Rand gesetzt: x={x_pdf:.1f} pt")
+            self._draw_lines()
+            return
 
         # NP-Zone: ausschliesslich Nullzeilen-Dinge, keine generelle Linien-Logik
         # (symmetrisch zu on_right_click — links = alles Linien-Bezogene)
@@ -1704,11 +1835,22 @@ class StripApp:
             self.rotation_per_page[to_page] = inherited
 
     def _transfer_left_margin(self, to_page):
-        """Erbt linken Rand von Seite to_page-2."""
+        """Erbt linken Rand: zuerst von to_page-2 (gleiche Scan-Seite), sonst to_page-1."""
         if to_page not in self.left_margin_per_page:
             inherited = self.left_margin_per_page.get(to_page - 2)
+            if inherited is None:
+                inherited = self.left_margin_per_page.get(to_page - 1)
             if inherited is not None:
                 self.left_margin_per_page[to_page] = inherited
+
+    def _transfer_right_margin(self, to_page):
+        """Erbt rechten Rand: zuerst von to_page-2 (gleiche Scan-Seite), sonst to_page-1."""
+        if to_page not in self.right_margin_per_page:
+            inherited = self.right_margin_per_page.get(to_page - 2)
+            if inherited is None:
+                inherited = self.right_margin_per_page.get(to_page - 1)
+            if inherited is not None:
+                self.right_margin_per_page[to_page] = inherited
 
     def _transfer_np_points(self, to_page):
         """Erbt Nullpunkte: zuerst von to_page-2 (Scan-Seite), sonst von to_page-1."""
@@ -1726,6 +1868,7 @@ class StripApp:
         self._transfer_np_points(self.page_index)
         self._transfer_rotation(self.page_index)
         self._transfer_left_margin(self.page_index)
+        self._transfer_right_margin(self.page_index)
         self._update_rotation_ui()
         self.render_page()
 
@@ -1903,9 +2046,11 @@ class StripApp:
             for i, (page_idx, y_top, y_bot, rotation, takt, forced_break) in enumerate(strips):
                 src_page = self.doc[page_idx]
                 left_x = self.left_margin_per_page.get(page_idx, src_page.rect.x0)
-                clip = fitz.Rect(left_x, y_top, src_page.rect.x1, y_bot)
-                strip_w = src_page.rect.x1 - left_x
-                has_custom_margin = page_idx in self.left_margin_per_page
+                right_x = self.right_margin_per_page.get(page_idx, src_page.rect.x1)
+                clip = fitz.Rect(left_x, y_top, right_x, y_bot)
+                strip_w = right_x - left_x
+                has_custom_margin = (page_idx in self.left_margin_per_page
+                                     or page_idx in self.right_margin_per_page)
                 takt_label = f"[{takt}]" if self._show_takt.get() else None
 
                 if rotation == 0:
@@ -1936,8 +2081,9 @@ class StripApp:
                     crop_y2 = int(y_bot * EXPORT_SCALE)
                     img = full_img.crop((0, crop_y1, full_img.width, crop_y2))
                     if has_custom_margin:
-                        crop_x = int(left_x * EXPORT_SCALE)
-                        img = img.crop((crop_x, 0, img.width, img.height))
+                        crop_x1 = int(left_x * EXPORT_SCALE)
+                        crop_x2 = int(right_x * EXPORT_SCALE)
+                        img = img.crop((crop_x1, 0, crop_x2, img.height))
                     if takt_label:
                         draw = ImageDraw.Draw(img)
                         px = int(8 * EXPORT_SCALE)
